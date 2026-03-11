@@ -26,6 +26,37 @@ const updateBookSchema = z.object({
 
 // ─── Routes ────────────────────────────────────────────────────────
 
+// POST /match — check hash + fuzzy title match
+bookRoutes.post('/match', async (c) => {
+  const body = await c.req.json();
+  const schema = z.object({
+    fileHash: z.string(),
+    title: z.string().optional(),
+  });
+  const { fileHash, title } = schema.parse(body);
+  const result = await bookService.matchBook(fileHash, title);
+  return c.json(result);
+});
+
+// POST /upload — upload PDF
+bookRoutes.post('/upload', async (c) => {
+  const formData = await c.req.formData();
+  const file = formData.get('file') as File;
+  if (!file) return c.json({ error: 'No file provided' }, 400);
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const { sha256 } = await import('../lib/hash.js');
+  const fileHash = sha256(buffer);
+
+  const title = (formData.get('title') as string) || file.name.replace('.pdf', '');
+  const author = formData.get('author') as string | undefined;
+  const totalPages = parseInt((formData.get('totalPages') as string) || '0');
+
+  const user = c.get('user');
+  const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author);
+  return c.json(result);
+});
+
 bookRoutes.get('/', async (c) => {
   const user = c.get('user');
   const books = await bookService.listBooks(user.id);

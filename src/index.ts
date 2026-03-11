@@ -15,7 +15,10 @@ import { settingsRoutes } from './routes/settings.js';
 import { syncRoutes } from './routes/sync.js';
 import { billingRoutes } from './routes/billing.js';
 import { adminRoutes } from './routes/admin.js';
+import { aiRoutes } from './routes/ai.js';
+import { processingRoutes } from './routes/processing.js';
 import { runCleanup } from './jobs/cleanup.js';
+import { startWorker } from './jobs/process-pdf.js';
 
 const app = new Hono().basePath('/api');
 
@@ -43,6 +46,8 @@ app.use('/sections/*', authMiddleware);
 app.use('/vocabulary/*', authMiddleware);
 app.use('/settings/*', authMiddleware);
 app.use('/sync/*', authMiddleware, rateLimiter(10));
+app.use('/ai/*', authMiddleware, rateLimiter(60));
+app.use('/processing/*', authMiddleware);
 app.use('/billing/*', authMiddleware);
 app.use('/admin/*', authMiddleware, adminMiddleware);
 
@@ -52,10 +57,13 @@ app.route('/sections', sectionRoutes);
 app.route('/vocabulary', vocabularyRoutes);
 app.route('/settings', settingsRoutes);
 app.route('/sync', syncRoutes);
+app.route('/ai', aiRoutes);
+app.route('/processing', processingRoutes);
 app.route('/billing', billingRoutes);
 app.route('/admin', adminRoutes);
 
-// Start cleanup job (every hour)
+// Start background workers
+startWorker();
 setInterval(runCleanup, 60 * 60 * 1000);
 
 serve({ fetch: app.fetch, port: config.PORT }, () => {

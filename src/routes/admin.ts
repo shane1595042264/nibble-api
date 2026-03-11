@@ -53,14 +53,14 @@ adminRoutes.delete('/catalog/:id', async (c) => {
 // List processing jobs
 adminRoutes.get('/jobs', async (c) => {
   const status = c.req.query('status');
-  const { processingJobs } = await import('../db/schema.js');
   const { eq, desc } = await import('drizzle-orm');
 
-  let query = db.select().from(processingJobs).orderBy(desc(processingJobs.createdAt)).limit(50);
+  let jobs;
   if (status) {
-    query = db.select().from(processingJobs).where(eq(processingJobs.status, status)).orderBy(desc(processingJobs.createdAt)).limit(50);
+    jobs = await db.select().from(processingJobs).where(eq(processingJobs.status, status)).orderBy(desc(processingJobs.createdAt)).limit(50);
+  } else {
+    jobs = await db.select().from(processingJobs).orderBy(desc(processingJobs.createdAt)).limit(50);
   }
-  const jobs = await query;
   return c.json(jobs);
 });
 

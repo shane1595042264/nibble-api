@@ -20,7 +20,7 @@ const syncPayloadSchema = z.object({
     chapters: z.array(syncEntitySchema).default([]),
     sections: z.array(syncEntitySchema).default([]),
     vocabulary: z.array(syncEntitySchema).default([]),
-    settings: z.record(z.unknown()).nullable().default(null),
+    settings: z.record(z.string(), z.unknown()).nullable().default(null),
     exerciseProgress: z.array(syncEntitySchema).default([]),
   }),
 });

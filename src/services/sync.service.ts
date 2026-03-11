@@ -96,7 +96,7 @@ export const syncService = {
         await bookRepository.create({
           ...clientBook,
           userId,
-        } as Parameters<typeof bookRepository.create>[0]);
+        } as any);
       } else {
         const clientTime = new Date(clientBook.updatedAt).getTime();
         const serverTime = new Date(server.updatedAt).getTime();
@@ -105,7 +105,7 @@ export const syncService = {
           if (clientBook.deletedAt) {
             await bookRepository.softDelete(clientBook.id);
           } else {
-            await bookRepository.update(clientBook.id, data as Parameters<typeof bookRepository.update>[1]);
+            await bookRepository.update(clientBook.id, data as any);
           }
         }
       }
@@ -116,7 +116,7 @@ export const syncService = {
       const server = await chapterRepository.findById(clientChapter.id);
       if (!server) {
         await chapterRepository.create(
-          clientChapter as Parameters<typeof chapterRepository.create>[0],
+          clientChapter as any,
         );
       } else {
         const clientTime = new Date(clientChapter.updatedAt).getTime();
@@ -126,7 +126,7 @@ export const syncService = {
           if (clientChapter.deletedAt) {
             await chapterRepository.softDelete(clientChapter.id);
           } else {
-            await chapterRepository.update(clientChapter.id, data as Parameters<typeof chapterRepository.update>[1]);
+            await chapterRepository.update(clientChapter.id, data as any);
           }
         }
       }
@@ -137,7 +137,7 @@ export const syncService = {
       const server = await sectionRepository.findById(clientSection.id);
       if (!server) {
         await sectionRepository.create(
-          clientSection as Parameters<typeof sectionRepository.create>[0],
+          clientSection as any,
         );
       } else {
         const clientTime = new Date(clientSection.updatedAt).getTime();
@@ -155,11 +155,11 @@ export const syncService = {
             await sectionRepository.update(clientSection.id, {
               ...data,
               ...progressMerge,
-            } as Parameters<typeof sectionRepository.update>[1]);
+            } as any);
           }
         } else {
           // Server wins on timestamp, but still apply reading-progress merge
-          await sectionRepository.update(clientSection.id, progressMerge as Parameters<typeof sectionRepository.update>[1]);
+          await sectionRepository.update(clientSection.id, progressMerge as any);
         }
       }
     }
@@ -171,7 +171,7 @@ export const syncService = {
         await vocabularyRepository.create({
           ...clientWord,
           userId,
-        } as Parameters<typeof vocabularyRepository.create>[0]);
+        } as any);
       } else {
         const clientTime = new Date(clientWord.updatedAt).getTime();
         const serverTime = new Date(server.updatedAt).getTime();
@@ -180,7 +180,7 @@ export const syncService = {
           if (clientWord.deletedAt) {
             await vocabularyRepository.softDelete(clientWord.id);
           } else {
-            await vocabularyRepository.update(clientWord.id, data as Parameters<typeof vocabularyRepository.update>[1]);
+            await vocabularyRepository.update(clientWord.id, data as any);
           }
         }
       }
@@ -190,10 +190,10 @@ export const syncService = {
     if (payload.changes.settings) {
       const serverSettings = await settingsRepository.findByUserId(userId);
       if (!serverSettings) {
-        await settingsRepository.upsert(userId, payload.changes.settings as Parameters<typeof settingsRepository.upsert>[1]);
+        await settingsRepository.upsert(userId, payload.changes.settings as any);
       } else {
         // Settings don't have an updatedAt in the payload; always apply (last-write-wins from client)
-        await settingsRepository.upsert(userId, payload.changes.settings as Parameters<typeof settingsRepository.upsert>[1]);
+        await settingsRepository.upsert(userId, payload.changes.settings as any);
       }
     }
 
