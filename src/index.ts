@@ -4,12 +4,18 @@ import { config } from './lib/config.js';
 import { corsMiddleware } from './middleware/cors.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authMiddleware } from './middleware/auth.js';
+import { adminMiddleware } from './middleware/admin.js';
+import { rateLimiter } from './middleware/rate-limit.js';
 import { healthRoutes } from './routes/health.js';
 import { bookRoutes } from './routes/books.js';
 import { chapterRoutes } from './routes/chapters.js';
 import { sectionRoutes } from './routes/sections.js';
 import { vocabularyRoutes } from './routes/vocabulary.js';
 import { settingsRoutes } from './routes/settings.js';
+import { syncRoutes } from './routes/sync.js';
+import { billingRoutes } from './routes/billing.js';
+import { adminRoutes } from './routes/admin.js';
+import { runCleanup } from './jobs/cleanup.js';
 
 const app = new Hono().basePath('/api');
 
@@ -20,18 +26,37 @@ app.onError(errorHandler);
 // Public routes
 app.route('/health', healthRoutes);
 
+// Stripe webhook (no auth — verified by Stripe signature)
+app.post('/billing/webhook', async (c) => {
+  const { billingService } = await import('./services/billing.service.js');
+  const signature = c.req.header('stripe-signature');
+  if (!signature) return c.json({ error: 'Missing signature' }, 400);
+  const body = await c.req.text();
+  await billingService.handleWebhook(body, signature);
+  return c.json({ received: true });
+});
+
 // Auth-protected routes
 app.use('/books/*', authMiddleware);
 app.use('/chapters/*', authMiddleware);
 app.use('/sections/*', authMiddleware);
 app.use('/vocabulary/*', authMiddleware);
 app.use('/settings/*', authMiddleware);
+app.use('/sync/*', authMiddleware, rateLimiter(10));
+app.use('/billing/*', authMiddleware);
+app.use('/admin/*', authMiddleware, adminMiddleware);
 
 app.route('/books', bookRoutes);
 app.route('/chapters', chapterRoutes);
 app.route('/sections', sectionRoutes);
 app.route('/vocabulary', vocabularyRoutes);
 app.route('/settings', settingsRoutes);
+app.route('/sync', syncRoutes);
+app.route('/billing', billingRoutes);
+app.route('/admin', adminRoutes);
+
+// Start cleanup job (every hour)
+setInterval(runCleanup, 60 * 60 * 1000);
 
 serve({ fetch: app.fetch, port: config.PORT }, () => {
   console.log(`nibble-api running on port ${config.PORT}`);

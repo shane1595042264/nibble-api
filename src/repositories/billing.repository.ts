@@ -81,6 +81,15 @@ export const billingRepository = {
     return charge ?? null;
   },
 
+  async findChargeByPaymentIntentId(stripePaymentIntentId: string) {
+    const [charge] = await db
+      .select()
+      .from(processingCharges)
+      .where(eq(processingCharges.stripePaymentIntentId, stripePaymentIntentId))
+      .limit(1);
+    return charge ?? null;
+  },
+
   async findChargesByUserId(userId: string) {
     return db
       .select()
