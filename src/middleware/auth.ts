@@ -2,6 +2,7 @@ import type { Context, Next } from 'hono';
 import { verifyJwt, type JwtClaims } from '../lib/jwt.js';
 import { config } from '../lib/config.js';
 import { Errors } from '../lib/errors.js';
+import { authService } from '../services/auth.service.js';
 
 declare module 'hono' {
   interface ContextVariableMap {
@@ -26,13 +27,12 @@ export async function authMiddleware(c: Context, next: Next) {
 
   c.set('jwtClaims', claims);
 
-  // User upsert will be added in Task 3 when we have the DB layer.
-  // For now, set a minimal user object from JWT claims.
+  const user = await authService.getOrCreateUser(claims);
   c.set('user', {
-    id: claims.sub,
-    email: claims.email,
-    name: claims.name,
-    authRole: claims.role,
+    id: user.id,
+    email: user.email,
+    name: user.name ?? '',
+    authRole: user.authRole,
   });
 
   await next();
