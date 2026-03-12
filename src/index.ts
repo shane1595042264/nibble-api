@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { config } from './lib/config.js';
+import { db } from './db/index.js';
 import { corsMiddleware } from './middleware/cors.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authMiddleware } from './middleware/auth.js';
@@ -20,6 +22,11 @@ import { aiRoutes } from './routes/ai.js';
 import { processingRoutes } from './routes/processing.js';
 import { runCleanup } from './jobs/cleanup.js';
 import { startWorker } from './jobs/process-pdf.js';
+
+// Run database migrations on startup
+console.log('Running database migrations...');
+await migrate(db, { migrationsFolder: './db/migrations' });
+console.log('Migrations complete.');
 
 const app = new Hono().basePath('/api');
 
