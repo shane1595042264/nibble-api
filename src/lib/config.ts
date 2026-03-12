@@ -17,6 +17,7 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().default(''),
   PROCESSING_PRICE_PER_PAGE_CENTS: z.coerce.number().default(5),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
+  FREE_AI_EMAILS: z.string().default(''),
 });
 
 export const config = envSchema.parse(process.env);

@@ -9,10 +9,11 @@ import { nibCache } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
 import { Errors } from '../lib/errors.js';
+import { hasFreeAiAccess } from '../lib/billing-access.js';
 
 export const processingRoutes = new Hono();
 
-// Start AI processing for an existing book (triggers payment)
+// Start AI processing for an existing book (triggers payment or free bypass)
 processingRoutes.post('/start', async (c) => {
   const user = c.get('user');
   const body = await c.req.json();
@@ -33,26 +34,33 @@ processingRoutes.post('/start', async (c) => {
   // Check for existing .nib cache
   const [existing] = await db.select().from(nibCache).where(eq(nibCache.fileHash, catalog.fileHash)).limit(1);
   if (existing) {
-    // Already processed by another user — link it
     await bookRepository.update(book.id, { processingStatus: 'complete', structureSource: 'ai' });
     const nibUrl = await storageService.getNibUrl(existing.r2Key);
     return c.json({ status: 'already_processed', nibUrl });
   }
 
-  // Create processing job
+  // Free users bypass Stripe
+  if (hasFreeAiAccess(user)) {
+    const job = await billingRepository.createJob({
+      fileHash: catalog.fileHash,
+      userId: user.id,
+      status: 'pending',
+      processingCostCents: 0,
+      paid: true,
+    });
+    await bookRepository.update(book.id, { processingStatus: 'pending' });
+    return c.json({ jobId: job.id, free: true });
+  }
+
+  // Regular users pay via Stripe
   const job = await billingRepository.createJob({
     fileHash: catalog.fileHash,
     userId: user.id,
     status: 'pending',
     processingCostCents: (catalog.totalPages ?? 0) * 5,
   });
-
-  // Update book status
   await bookRepository.update(book.id, { processingStatus: 'pending' });
-
-  // Create payment intent
   const payment = await billingService.createPaymentIntent(user.id, job.id, catalog.totalPages ?? 0);
-
   return c.json({ jobId: job.id, ...payment });
 });
 

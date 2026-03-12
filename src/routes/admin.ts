@@ -4,9 +4,36 @@ import { bookRepository } from '../repositories/book.repository.js';
 import { billingRepository } from '../repositories/billing.repository.js';
 import { db } from '../db/index.js';
 import { users, books, processingJobs, processingCharges } from '../db/schema.js';
-import { sql, count, sum } from 'drizzle-orm';
+import { sql, count, sum, desc, eq } from 'drizzle-orm';
+import { userRepository } from '../repositories/user.repository.js';
+import { Errors } from '../lib/errors.js';
 
 export const adminRoutes = new Hono();
+
+// List all users
+adminRoutes.get('/users', async (c) => {
+  const allUsers = await db.select({
+    id: users.id,
+    email: users.email,
+    name: users.name,
+    authRole: users.authRole,
+    createdAt: users.createdAt,
+  }).from(users).orderBy(desc(users.createdAt));
+  return c.json(allUsers);
+});
+
+// Update user role
+adminRoutes.put('/users/:id/role', async (c) => {
+  const userId = c.req.param('id');
+  const body = await c.req.json();
+  const { role } = z.object({ role: z.enum(['admin', 'user']) }).parse(body);
+
+  const target = await userRepository.findById(userId);
+  if (!target) throw Errors.notFound('User');
+
+  const updated = await userRepository.update(userId, { authRole: role });
+  return c.json({ id: updated.id, email: updated.email, authRole: updated.authRole });
+});
 
 // List catalog entries (paginated)
 adminRoutes.get('/catalog', async (c) => {
@@ -45,7 +72,6 @@ adminRoutes.put('/catalog/:id', async (c) => {
 // Delete catalog entry
 adminRoutes.delete('/catalog/:id', async (c) => {
   const { bookCatalog } = await import('../db/schema.js');
-  const { eq } = await import('drizzle-orm');
   await db.delete(bookCatalog).where(eq(bookCatalog.id, c.req.param('id')));
   return c.json({ deleted: true });
 });
@@ -53,7 +79,6 @@ adminRoutes.delete('/catalog/:id', async (c) => {
 // List processing jobs
 adminRoutes.get('/jobs', async (c) => {
   const status = c.req.query('status');
-  const { eq, desc } = await import('drizzle-orm');
 
   let jobs;
   if (status) {

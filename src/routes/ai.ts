@@ -21,6 +21,20 @@ const explainSchema = z.object({
   bookContext: z.string().optional(),
 });
 
+// OCR — extract text from page images using Claude Vision
+aiRoutes.post('/ocr', async (c) => {
+  const body = await c.req.json();
+  const schema = z.object({
+    images: z.array(z.string().min(1)),
+  });
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
+  }
+  const texts = await aiService.ocrPages(parsed.data.images);
+  return c.json({ texts });
+});
+
 aiRoutes.post('/word-context', async (c) => {
   const body = await c.req.json();
   const parsed = wordContextSchema.safeParse(body);
