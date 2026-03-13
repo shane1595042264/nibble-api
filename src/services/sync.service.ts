@@ -41,6 +41,23 @@ interface SyncResponse {
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(s: unknown): boolean {
+  return typeof s === 'string' && UUID_RE.test(s);
+}
+
+/** Convert string timestamps in an entity to Date objects for Drizzle */
+function coerceDates(entity: Record<string, unknown>): Record<string, unknown> {
+  const dateFields = ['createdAt', 'updatedAt', 'deletedAt', 'readAt', 'lastReadAt', 'lastReviewedAt', 'completedAt'];
+  const result = { ...entity };
+  for (const field of dateFields) {
+    if (result[field] && typeof result[field] === 'string') {
+      result[field] = new Date(result[field] as string);
+    }
+  }
+  return result;
+}
+
 /**
  * Resolve reading-progress conflicts for sections.
  * - isRead=true always wins over false, regardless of timestamp.
@@ -91,99 +108,111 @@ export const syncService = {
 
     // Books
     for (const clientBook of payload.changes.books) {
-      const server = await bookRepository.findById(clientBook.id);
-      if (!server) {
-        await bookRepository.create({
-          ...clientBook,
-          userId,
-        } as any);
-      } else {
-        const clientTime = new Date(clientBook.updatedAt).getTime();
-        const serverTime = new Date(server.updatedAt).getTime();
-        if (clientTime > serverTime) {
-          const { id, createdAt, updatedAt, ...data } = clientBook;
-          if (clientBook.deletedAt) {
-            await bookRepository.softDelete(clientBook.id);
-          } else {
-            await bookRepository.update(clientBook.id, data as any);
+      try {
+        if (!isValidUuid(clientBook.id)) continue;
+        const coerced = coerceDates(clientBook);
+        const server = await bookRepository.findById(clientBook.id);
+        if (!server) {
+          await bookRepository.create({
+            ...coerced,
+            userId,
+          } as any);
+        } else {
+          const clientTime = new Date(clientBook.updatedAt).getTime();
+          const serverTime = new Date(server.updatedAt).getTime();
+          if (clientTime > serverTime) {
+            const { id, createdAt, updatedAt, ...data } = coerced;
+            if (clientBook.deletedAt) {
+              await bookRepository.softDelete(clientBook.id);
+            } else {
+              await bookRepository.update(clientBook.id, data as any);
+            }
           }
         }
-      }
+      } catch (e) { console.error('[sync] book error:', clientBook.id, e); }
     }
 
     // Chapters
     for (const clientChapter of payload.changes.chapters) {
-      const server = await chapterRepository.findById(clientChapter.id);
-      if (!server) {
-        await chapterRepository.create(
-          clientChapter as any,
-        );
-      } else {
-        const clientTime = new Date(clientChapter.updatedAt).getTime();
-        const serverTime = new Date(server.updatedAt).getTime();
-        if (clientTime > serverTime) {
-          const { id, createdAt, updatedAt, ...data } = clientChapter;
-          if (clientChapter.deletedAt) {
-            await chapterRepository.softDelete(clientChapter.id);
-          } else {
-            await chapterRepository.update(clientChapter.id, data as any);
+      try {
+        if (!isValidUuid(clientChapter.id)) continue;
+        const coerced = coerceDates(clientChapter);
+        const server = await chapterRepository.findById(clientChapter.id);
+        if (!server) {
+          await chapterRepository.create(coerced as any);
+        } else {
+          const clientTime = new Date(clientChapter.updatedAt).getTime();
+          const serverTime = new Date(server.updatedAt).getTime();
+          if (clientTime > serverTime) {
+            const { id, createdAt, updatedAt, ...data } = coerced;
+            if (clientChapter.deletedAt) {
+              await chapterRepository.softDelete(clientChapter.id);
+            } else {
+              await chapterRepository.update(clientChapter.id, data as any);
+            }
           }
         }
-      }
+      } catch (e) { console.error('[sync] chapter error:', clientChapter.id, e); }
     }
 
     // Sections (with reading-progress special rule)
     for (const clientSection of payload.changes.sections) {
-      const server = await sectionRepository.findById(clientSection.id);
-      if (!server) {
-        await sectionRepository.create(
-          clientSection as any,
-        );
-      } else {
-        const clientTime = new Date(clientSection.updatedAt).getTime();
-        const serverTime = new Date(server.updatedAt).getTime();
-
-        // Always resolve reading-progress conflicts regardless of timestamp
-        const progressMerge = resolveConflict(clientSection, server);
-
-        if (clientTime > serverTime) {
-          // Client wins on general fields, but merge reading progress
-          const { id, createdAt, updatedAt, ...data } = clientSection;
-          if (clientSection.deletedAt) {
-            await sectionRepository.softDelete(clientSection.id);
-          } else {
-            await sectionRepository.update(clientSection.id, {
-              ...data,
-              ...progressMerge,
-            } as any);
-          }
+      try {
+        if (!isValidUuid(clientSection.id)) continue;
+        const coerced = coerceDates(clientSection);
+        const server = await sectionRepository.findById(clientSection.id);
+        if (!server) {
+          await sectionRepository.create(coerced as any);
         } else {
-          // Server wins on timestamp, but still apply reading-progress merge
-          await sectionRepository.update(clientSection.id, progressMerge as any);
+          const clientTime = new Date(clientSection.updatedAt).getTime();
+          const serverTime = new Date(server.updatedAt).getTime();
+
+          // Always resolve reading-progress conflicts regardless of timestamp
+          const progressMerge = resolveConflict(clientSection, server);
+
+          if (clientTime > serverTime) {
+            // Client wins on general fields, but merge reading progress
+            const { id, createdAt, updatedAt, ...data } = coerced;
+            if (clientSection.deletedAt) {
+              await sectionRepository.softDelete(clientSection.id);
+            } else {
+              await sectionRepository.update(clientSection.id, {
+                ...data,
+                ...progressMerge,
+              } as any);
+            }
+          } else {
+            // Server wins on timestamp, but still apply reading-progress merge
+            await sectionRepository.update(clientSection.id, progressMerge as any);
+          }
         }
-      }
+      } catch (e) { console.error('[sync] section error:', clientSection.id, e); }
     }
 
     // Vocabulary
     for (const clientWord of payload.changes.vocabulary) {
-      const server = await vocabularyRepository.findById(clientWord.id);
-      if (!server) {
-        await vocabularyRepository.create({
-          ...clientWord,
-          userId,
-        } as any);
-      } else {
-        const clientTime = new Date(clientWord.updatedAt).getTime();
-        const serverTime = new Date(server.updatedAt).getTime();
-        if (clientTime > serverTime) {
-          const { id, createdAt, updatedAt, ...data } = clientWord;
-          if (clientWord.deletedAt) {
-            await vocabularyRepository.softDelete(clientWord.id);
-          } else {
-            await vocabularyRepository.update(clientWord.id, data as any);
+      try {
+        if (!isValidUuid(clientWord.id)) continue;
+        const coerced = coerceDates(clientWord);
+        const server = await vocabularyRepository.findById(clientWord.id);
+        if (!server) {
+          await vocabularyRepository.create({
+            ...coerced,
+            userId,
+          } as any);
+        } else {
+          const clientTime = new Date(clientWord.updatedAt).getTime();
+          const serverTime = new Date(server.updatedAt).getTime();
+          if (clientTime > serverTime) {
+            const { id, createdAt, updatedAt, ...data } = coerced;
+            if (clientWord.deletedAt) {
+              await vocabularyRepository.softDelete(clientWord.id);
+            } else {
+              await vocabularyRepository.update(clientWord.id, data as any);
+            }
           }
         }
-      }
+      } catch (e) { console.error('[sync] vocab error:', clientWord.id, e); }
     }
 
     // Settings
