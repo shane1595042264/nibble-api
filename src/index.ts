@@ -25,7 +25,7 @@ import { startWorker } from './jobs/process-pdf.js';
 
 // Run database migrations on startup
 console.log('Running database migrations...');
-await migrate(db, { migrationsFolder: './db/migrations' });
+await migrate(db, { migrationsFolder: './dist/db/migrations' });
 console.log('Migrations complete.');
 
 const app = new Hono().basePath('/api');
