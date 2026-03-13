@@ -111,7 +111,7 @@ bookRoutes.get('/:id/download', async (c) => {
 
   c.header('Content-Type', 'application/pdf');
   c.header('Content-Disposition', `attachment; filename="${catalog.title || 'book'}.pdf"`);
-  return c.body(buffer);
+  return c.body(new Uint8Array(buffer));
 });
 
 // GET /:id/summary — get book with catalog info for sync
