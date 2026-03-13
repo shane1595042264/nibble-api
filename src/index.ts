@@ -53,7 +53,7 @@ app.use('/chapters/*', authMiddleware);
 app.use('/sections/*', authMiddleware);
 app.use('/vocabulary/*', authMiddleware);
 app.use('/settings/*', authMiddleware);
-app.use('/sync/*', authMiddleware, rateLimiter(10));
+app.use('/sync/*', authMiddleware, rateLimiter(30));
 app.use('/ai/*', authMiddleware, rateLimiter(60), aiAccessMiddleware);
 app.use('/processing/*', authMiddleware);
 app.use('/billing/*', authMiddleware);
