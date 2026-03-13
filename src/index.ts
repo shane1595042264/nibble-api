@@ -23,6 +23,15 @@ import { processingRoutes } from './routes/processing.js';
 import { runCleanup } from './jobs/cleanup.js';
 import { startWorker } from './jobs/process-pdf.js';
 
+// ONE-TIME DB RESET: drop everything so migrations run clean
+// TODO: Remove this block after first successful deploy
+import { sql } from 'drizzle-orm';
+console.log('Resetting database for clean migration...');
+await db.execute(sql`DROP SCHEMA IF EXISTS drizzle CASCADE`);
+await db.execute(sql`DROP SCHEMA public CASCADE`);
+await db.execute(sql`CREATE SCHEMA public`);
+console.log('Database reset complete.');
+
 // Run database migrations on startup
 console.log('Running database migrations...');
 await migrate(db, { migrationsFolder: './dist/db/migrations' });
