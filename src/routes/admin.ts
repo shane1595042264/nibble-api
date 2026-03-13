@@ -76,6 +76,25 @@ adminRoutes.delete('/catalog/:id', async (c) => {
   return c.json({ deleted: true });
 });
 
+// Add a catalog book to admin's own bookshelf (marketplace → library)
+adminRoutes.post('/catalog/:id/add-to-shelf', async (c) => {
+  const user = c.get('user');
+  const catalogId = c.req.param('id');
+  const catalog = await bookRepository.findCatalogById(catalogId);
+  if (!catalog) throw Errors.notFound('Catalog entry');
+
+  // Check if already in user's library
+  const existing = await bookRepository.findByUserIdAndCatalogId(user.id, catalogId);
+  if (existing) return c.json({ book: existing, alreadyExists: true });
+
+  const book = await bookRepository.create({
+    userId: user.id,
+    catalogId,
+    processingStatus: 'complete',
+  });
+  return c.json({ book, alreadyExists: false }, 201);
+});
+
 // List processing jobs
 adminRoutes.get('/jobs', async (c) => {
   const status = c.req.query('status');

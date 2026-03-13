@@ -1,6 +1,6 @@
 import { eq, and, isNull, gte, sql, desc } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { books, bookCatalog } from '../db/schema.js';
+import { books, bookCatalog, chapters, sections, vocabulary } from '../db/schema.js';
 
 export const bookRepository = {
   // ─── User books ────────────────────────────────────────────────
@@ -76,6 +76,14 @@ export const bookRepository = {
       .where(eq(books.id, id))
       .returning();
     return deleted ?? null;
+  },
+
+  /** Hard delete book + chapters + sections + vocab. Catalog entry (marketplace) is preserved. */
+  async hardDelete(id: string) {
+    await db.delete(sections).where(eq(sections.bookId, id));
+    await db.delete(chapters).where(eq(chapters.bookId, id));
+    await db.delete(vocabulary).where(eq(vocabulary.bookId, id));
+    await db.delete(books).where(eq(books.id, id));
   },
 
   async findModifiedSince(userId: string, since: Date) {
