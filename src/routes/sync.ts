@@ -27,6 +27,40 @@ const syncPayloadSchema = z.object({
 
 // ─── Routes ─────────────────────────────────────────────────────────
 
+// GET /status — cloud sync status (book count, last updated, etc.)
+syncRoutes.get('/status', async (c) => {
+  const user = c.get('user');
+  const { bookRepository } = await import('../repositories/book.repository.js');
+  const { chapterRepository } = await import('../repositories/chapter.repository.js');
+  const { sectionRepository } = await import('../repositories/section.repository.js');
+  const { vocabularyRepository } = await import('../repositories/vocabulary.repository.js');
+
+  const books = await bookRepository.findByUserId(user.id);
+  let totalChapters = 0;
+  let totalSections = 0;
+  let lastUpdated: Date | null = null;
+
+  for (const book of books) {
+    const chapters = await chapterRepository.findByBookId(book.id);
+    totalChapters += chapters.length;
+    const sections = await sectionRepository.findByBookId(book.id);
+    totalSections += sections.length;
+    const bookUpdated = new Date(book.updatedAt);
+    if (!lastUpdated || bookUpdated > lastUpdated) lastUpdated = bookUpdated;
+  }
+
+  const vocabCount = await vocabularyRepository.countByUserId(user.id);
+
+  return c.json({
+    books: books.map(b => ({ id: b.id, customTitle: b.customTitle, catalogId: b.catalogId, updatedAt: b.updatedAt })),
+    bookCount: books.length,
+    chapterCount: totalChapters,
+    sectionCount: totalSections,
+    vocabCount,
+    lastUpdated: lastUpdated?.toISOString() ?? null,
+  });
+});
+
 syncRoutes.post('/', async (c) => {
   const user = c.get('user');
   const body = await c.req.json();

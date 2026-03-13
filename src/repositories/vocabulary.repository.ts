@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte } from 'drizzle-orm';
+import { eq, and, isNull, gte, count } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { vocabulary } from '../db/schema.js';
 
@@ -84,6 +84,14 @@ export const vocabularyRepository = {
       .where(eq(vocabulary.id, id))
       .returning();
     return deleted ?? null;
+  },
+
+  async countByUserId(userId: string): Promise<number> {
+    const [result] = await db
+      .select({ value: count() })
+      .from(vocabulary)
+      .where(and(eq(vocabulary.userId, userId), isNull(vocabulary.deletedAt)));
+    return result?.value ?? 0;
   },
 
   async findModifiedSince(userId: string, since: Date) {

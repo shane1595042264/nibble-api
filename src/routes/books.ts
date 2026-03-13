@@ -91,6 +91,38 @@ bookRoutes.put('/:id', async (c) => {
   return c.json(book);
 });
 
+// GET /:id/download — download PDF from R2
+bookRoutes.get('/:id/download', async (c) => {
+  const user = c.get('user');
+  const book = await bookService.getBook(c.req.param('id'), user.id);
+
+  const { bookRepository } = await import('../repositories/book.repository.js');
+  const catalog = await bookRepository.findCatalogById(book.catalogId);
+  if (!catalog) throw new AppError('NOT_FOUND', 'Catalog entry not found', 404);
+
+  const { db } = await import('../db/index.js');
+  const { pdfFiles } = await import('../db/schema.js');
+  const { eq } = await import('drizzle-orm');
+  const [pdfFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, catalog.fileHash)).limit(1);
+  if (!pdfFile) throw new AppError('NOT_FOUND', 'PDF file not found', 404);
+
+  const { storageService } = await import('../services/storage.service.js');
+  const buffer = await storageService.downloadPdf(pdfFile.r2Key);
+
+  c.header('Content-Type', 'application/pdf');
+  c.header('Content-Disposition', `attachment; filename="${catalog.title || 'book'}.pdf"`);
+  return c.body(buffer);
+});
+
+// GET /:id/summary — get book with catalog info for sync
+bookRoutes.get('/:id/summary', async (c) => {
+  const user = c.get('user');
+  const book = await bookService.getBook(c.req.param('id'), user.id);
+  const { bookRepository } = await import('../repositories/book.repository.js');
+  const catalog = await bookRepository.findCatalogById(book.catalogId);
+  return c.json({ book, catalog });
+});
+
 bookRoutes.delete('/:id', async (c) => {
   const user = c.get('user');
   const book = await bookService.deleteBook(c.req.param('id'), user.id);
