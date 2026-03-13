@@ -28,6 +28,23 @@ export const bookService = {
     return bookRepository.softDelete(book.id);
   },
 
+  async updateBookMetadata(
+    bookId: string,
+    userId: string,
+    data: { title?: string; author?: string; description?: string; coverUrl?: string | null; language?: string; publisher?: string; publishYear?: number | null },
+  ) {
+    const book = await this.getBook(bookId, userId);
+    const catalog = await bookRepository.findCatalogById(book.catalogId);
+    if (!catalog) throw Errors.notFound('Catalog entry');
+
+    const updated = await bookRepository.updateCatalog(catalog.id, {
+      ...data,
+      coverUrl: data.coverUrl ?? undefined,
+      publishYear: data.publishYear ?? undefined,
+    });
+    return { book, catalog: updated };
+  },
+
   async matchBook(fileHash: string, title?: string) {
     // 1. Check exact hash match in book_catalog
     const exactMatch = await bookRepository.findCatalogByHash(fileHash);

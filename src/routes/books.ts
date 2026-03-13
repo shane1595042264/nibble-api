@@ -96,3 +96,25 @@ bookRoutes.delete('/:id', async (c) => {
   const book = await bookService.deleteBook(c.req.param('id'), user.id);
   return c.json(book);
 });
+
+// PUT /:id/metadata — update catalog metadata (title, author, etc.)
+const updateMetadataSchema = z.object({
+  title: z.string().min(1).optional(),
+  author: z.string().optional(),
+  description: z.string().optional(),
+  coverUrl: z.string().url().optional().nullable(),
+  language: z.string().optional(),
+  publisher: z.string().optional(),
+  publishYear: z.number().int().optional().nullable(),
+});
+
+bookRoutes.put('/:id/metadata', async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json();
+  const parsed = updateMetadataSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+  const result = await bookService.updateBookMetadata(c.req.param('id'), user.id, parsed.data);
+  return c.json(result);
+});

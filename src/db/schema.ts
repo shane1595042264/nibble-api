@@ -12,11 +12,30 @@ export const users = pgTable('users', {
   name: text('name'),
   avatarUrl: text('avatar_url'),
   passwordHash: text('password_hash'),
+  emailVerified: boolean('email_verified').notNull().default(false),
   authRole: text('auth_role').notNull().default('user'),
   stripeCustomerId: text('stripe_customer_id'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 });
+
+// ============ OAUTH ACCOUNTS (for NextAuth account linking) ============
+export const oauthAccounts = pgTable('oauth_accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  providerAccountId: text('provider_account_id').notNull(),
+  accessToken: text('access_token'),
+  refreshToken: text('refresh_token'),
+  expiresAt: integer('expires_at'),
+  tokenType: text('token_type'),
+  scope: text('scope'),
+  idToken: text('id_token'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('idx_oauth_provider_account').on(table.provider, table.providerAccountId),
+  index('idx_oauth_user').on(table.userId),
+]);
 
 // ============ USER SETTINGS ============
 export const userSettings = pgTable('user_settings', {
