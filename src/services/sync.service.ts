@@ -51,8 +51,11 @@ function coerceDates(entity: Record<string, unknown>): Record<string, unknown> {
   const dateFields = ['createdAt', 'updatedAt', 'deletedAt', 'readAt', 'lastReadAt', 'lastReviewedAt', 'completedAt'];
   const result = { ...entity };
   for (const field of dateFields) {
-    if (result[field] && typeof result[field] === 'string') {
-      result[field] = new Date(result[field] as string);
+    const val = result[field];
+    if (val && typeof val === 'string') {
+      result[field] = new Date(val);
+    } else if (val && typeof val === 'number') {
+      result[field] = new Date(val);
     }
   }
   return result;
