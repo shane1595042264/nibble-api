@@ -1,4 +1,7 @@
 import { bookRepository } from '../repositories/book.repository.js';
+import { processingLogRepository } from '../repositories/processing-log.repository.js';
+import { db } from '../db/index.js';
+import { processingJobs } from '../db/schema.js';
 import { Errors } from '../lib/errors.js';
 
 export const bookService = {
@@ -107,15 +110,64 @@ export const bookService = {
     // 6. Create book in user's library
     const existing = await bookRepository.findByUserIdAndCatalogId(userId, catalogEntry.id);
     if (existing) {
-      return { book: existing, catalogEntry, isNew: false };
+      // Check if we should start processing for existing book
+      let jobId: string | undefined;
+      const activeJob = await processingLogRepository.findActiveJobByFileHash(fileHash);
+      if (activeJob) {
+        jobId = activeJob.id;
+      } else if (existing.processingStatus !== 'complete') {
+        const [job] = await db.insert(processingJobs).values({
+          fileHash,
+          userId,
+          bookId: existing.id,
+          status: 'pending',
+        }).returning();
+        jobId = job.id;
+        await bookRepository.update(existing.id, { processingStatus: 'processing' });
+        // Fire-and-forget pipeline
+        setTimeout(async () => {
+          try {
+            const { processingService } = await import('./processing.service.js');
+            await processingService.orchestratePipeline(job.id, fileHash, existing.id);
+          } catch (err) {
+            console.error('Processing pipeline failed:', err);
+          }
+        }, 0);
+      }
+      return { book: existing, catalogEntry, jobId, isNew: false };
     }
 
     const book = await bookRepository.create({
       userId,
       catalogId: catalogEntry.id,
-      processingStatus: 'none',
+      processingStatus: 'pending',
     });
 
-    return { book, catalogEntry, isNew: true };
+    // Auto-start processing for new books
+    let jobId: string | undefined;
+    const activeJob = await processingLogRepository.findActiveJobByFileHash(fileHash);
+    if (activeJob) {
+      jobId = activeJob.id;
+    } else {
+      const [job] = await db.insert(processingJobs).values({
+        fileHash,
+        userId,
+        bookId: book.id,
+        status: 'pending',
+      }).returning();
+      jobId = job.id;
+      await bookRepository.update(book.id, { processingStatus: 'processing' });
+      // Fire-and-forget pipeline
+      setTimeout(async () => {
+        try {
+          const { processingService } = await import('./processing.service.js');
+          await processingService.orchestratePipeline(job.id, fileHash, book.id);
+        } catch (err) {
+          console.error('Processing pipeline failed:', err);
+        }
+      }, 0);
+    }
+
+    return { book, catalogEntry, jobId, isNew: true };
   },
 };

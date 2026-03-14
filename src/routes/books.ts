@@ -54,7 +54,7 @@ bookRoutes.post('/upload', async (c) => {
 
   const user = c.get('user');
   const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author);
-  return c.json(result);
+  return c.json({ ...result, jobId: result.jobId });
 });
 
 bookRoutes.get('/', async (c) => {
