@@ -65,6 +65,23 @@ processingRoutes.post('/start', async (c) => {
   return c.json({ jobId: job.id, ...payment });
 });
 
+// Cancel a processing job
+processingRoutes.post('/:jobId/cancel', async (c) => {
+  const user = c.get('user');
+  const jobId = c.req.param('jobId');
+
+  const job = await processingLogRepository.getJob(jobId);
+  if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
+
+  if (job.status === 'completed') {
+    return c.json({ error: 'Job already completed' }, 400);
+  }
+
+  const { processingService } = await import('../services/processing.service.js');
+  await processingService.cancelJob(jobId);
+  return c.json({ cancelled: true });
+});
+
 // Check processing status
 processingRoutes.get('/:jobId', async (c) => {
   const user = c.get('user');

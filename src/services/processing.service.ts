@@ -6,7 +6,7 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { sectionRepository } from '../repositories/section.repository.js';
 import { NibParser } from '../lib/nib/parser.js';
 import { db } from '../db/index.js';
-import { pdfFiles, sections, bookCatalog, books } from '../db/schema.js';
+import { pdfFiles, sections, chapters, bookCatalog, books } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 const parser = new NibParser();
@@ -32,12 +32,22 @@ export const processingService = {
       await processingLogRepository.updateJobProgress(jobId, 5, 'metadata');
       await processingLogRepository.append(jobId, 'metadata', 'Extracting PDF metadata...');
 
-      const metadata = await pdfService.extractMetadata(pdfBuffer);
-      const totalPages = metadata.totalPages;
+      // Load document ONCE and reuse for all stages
+      const doc = await pdfService.loadDocument(pdfBuffer);
+      const totalPages = doc.numPages;
+
+      let metadataTitle = 'unknown';
+      let metadataAuthor = 'unknown';
+      try {
+        const meta = await doc.getMetadata();
+        const info = meta?.info as any;
+        metadataTitle = info?.Title || 'unknown';
+        metadataAuthor = info?.Author || 'unknown';
+      } catch { /* ignore metadata errors */ }
 
       await processingLogRepository.append(
         jobId, 'metadata',
-        `Metadata extracted: ${totalPages} pages, title="${metadata.title ?? 'unknown'}", author="${metadata.author ?? 'unknown'}"`,
+        `Metadata extracted: ${totalPages} pages, title="${metadataTitle}", author="${metadataAuthor}"`,
       );
       await processingLogRepository.updateJobProgress(jobId, 10, 'metadata');
 
@@ -45,7 +55,7 @@ export const processingService = {
       await processingLogRepository.updateJobProgress(jobId, 10, 'toc');
       await processingLogRepository.append(jobId, 'toc', 'Extracting table of contents...');
 
-      const outline = await pdfService.extractOutline(pdfBuffer);
+      const outline = await pdfService.extractOutlineFromDoc(doc);
       const hasToc = outline.length > 0;
 
       await processingLogRepository.append(
@@ -84,7 +94,7 @@ export const processingService = {
         let sectionText = '';
         for (let page = startPage; page <= endPage; page++) {
           try {
-            const rawPageData = await pdfService.extractRichPageData(pdfBuffer, page);
+            const rawPageData = await pdfService.extractRichPageDataFromDoc(doc, page);
             // Convert to NibParser's expected format
             const parserInput = {
               pageNumber: rawPageData.pageNumber,
@@ -239,12 +249,25 @@ export const processingService = {
       await processingLogRepository.completeJob(jobId);
       await processingLogRepository.append(jobId, 'finalize', 'Processing complete!');
 
+      await doc.destroy().catch(() => {});
     } catch (error: any) {
       const errorMessage = error.message ?? 'Unknown error';
       await processingLogRepository.append(jobId, 'error', `Pipeline failed: ${errorMessage}`, 'error');
       await processingLogRepository.failJob(jobId, errorMessage);
       await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
-      throw error;
+    }
+  },
+
+  /** Cancel a processing job */
+  async cancelJob(jobId: string): Promise<void> {
+    await processingLogRepository.append(jobId, 'cancel', 'Processing cancelled by user');
+    await processingLogRepository.failJob(jobId, 'Cancelled by user');
+    const job = await processingLogRepository.getJob(jobId);
+    if (job?.bookId) {
+      // Clean up: delete chapters/sections created during processing, reset book status
+      await db.delete(sections).where(eq(sections.bookId, job.bookId));
+      await db.delete(chapters).where(eq(chapters.bookId, job.bookId));
+      await bookRepository.update(job.bookId, { processingStatus: 'error' });
     }
   },
 };
