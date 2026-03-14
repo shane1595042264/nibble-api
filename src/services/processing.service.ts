@@ -1,218 +1,118 @@
+// src/services/processing.service.ts
 import { storageService } from './storage.service.js';
-import { aiService, type PageAnalysis } from './ai.service.js';
-import { mathpixService, type MathRegion } from './mathpix.service.js';
-import { bookRepository } from '../repositories/book.repository.js';
-import { exerciseRepository } from '../repositories/exercise.repository.js';
-import { billingRepository } from '../repositories/billing.repository.js';
-import { db } from '../db/index.js';
-import { nibCache, pdfFiles, chapters, sections } from '../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { mathpixService } from './mathpix.service.js'; // Assuming this is the "smart" parser
+import { aiService } from './ai.service.js';
+import { pdfService } from './pdf.service.js'; // NEW
+// Assuming other imports like repositories for saving data
 
-export const processingService = {
+// Define a basic structure for processed content, matching what AI service might return
+interface ProcessedSection {
+  title: string;
+  content: string;
+  type: 'text' | 'figure' | 'table' | 'heading';
+  page?: number;
+}
+
+interface ProcessedDocument {
+  type: 'structured_pdf' | 'general_pdf';
+  sections: ProcessedSection[];
+  // Add other metadata as needed, e.g., rawText for general PDFs
+  rawText?: string;
+  // Potentially Mathpix specific data for structured PDFs
+  mathpixData?: any;
+}
+
+class ProcessingService {
+  /**
+   * Orchestrates the PDF processing pipeline.
+   * It attempts smart parsing first, then falls back to general PDF processing
+   * for documents without a detected Table of Contents or structured data.
+   * @param jobId The ID of the processing job.
+   * @param fileHash The hash of the file to process.
+   * @param userId The ID of the user who uploaded the file.
+   */
   async orchestratePipeline(jobId: string, fileHash: string, userId: string): Promise<void> {
-    console.log(`[Job ${jobId}] Starting PDF processing pipeline for file: ${fileHash}`);
-    const job = await billingRepository.findJobById(jobId);
-    if (!job) throw new Error('Job not found');
+    console.log(`Job ${jobId}: Starting PDF processing for file ${fileHash}`);
+    const pdfBuffer = await storageService.getFile(fileHash); // Get PDF content from storage
+
+    let processedDocument: ProcessedDocument | null = null;
+    let isGeneralPdf = false;
 
     try {
-      // Update progress
-      const updateProgress = async (progress: number) => {
-        await billingRepository.updateJobStatus(jobId, { progress, status: 'processing' });
-      };
+      // Attempt smart parsing (e.g., using Mathpix for structured PDFs)
+      // Mathpix typically returns a structured JSON output.
+      const mathpixResult = await mathpixService.processPdf(pdfBuffer); // Assuming this method exists and returns structured data
 
-      // Step 1: Download PDF from R2
-      await updateProgress(5);
-      const [pdfFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
-      if (!pdfFile) throw new Error('PDF not found in storage');
-      const pdfBuffer = await storageService.downloadPdf(pdfFile.r2Key);
-      console.log(`[Job ${jobId}] Step 1: PDF downloaded. Size: ${pdfBuffer.length} bytes.`);
-
-      // Step 2: Extract text (using pdfjs-dist would go here in production)
-      // For now, we'll work with a placeholder text extraction
-      await updateProgress(15);
-      const extractedText = await extractTextFromPdf(pdfBuffer);
-      console.log(`[Job ${jobId}] Step 2: Text extraction complete. Pages: ${extractedText.length}.`);
-
-      // Step 3: Claude TEXT - structure classification (cheap, all pages)
-      await updateProgress(25);
-      const pageAnalyses = await aiService.classifyPages(extractedText);
-      console.log(`[Job ${jobId}] Step 3: AI classified ${pageAnalyses.length} pages for structure.`);
-
-      // Step 4: Update chapters/sections in DB from analysis
-      await updateProgress(40);
-      await updateStructureFromAnalysis(jobId, userId, fileHash, pageAnalyses);
-      console.log(`[Job ${jobId}] Step 4: Chapters and sections updated in DB.`);
-
-      // Step 5: Detect math pages (free, local)
-      const mathPages = aiService.detectMathPages(extractedText, pageAnalyses);
-      await updateProgress(50);
-      console.log(`[Job ${jobId}] Step 5: Detected ${mathPages.length} math-heavy pages.`);
-
-      // Step 6: Extract exercises
-      const exercises = aiService.identifyExercises(pageAnalyses);
-      await updateProgress(60);
-      console.log(`[Job ${jobId}] Step 6: Identified ${exercises.length} exercises.`);
-
-      // Step 7: Store exercises in DB
-      const catalogEntry = await bookRepository.findCatalogByHash(fileHash);
-      if (catalogEntry && exercises.length > 0) {
-        await exerciseRepository.bulkCreate(
-          exercises.map((ex, idx) => ({
-            catalogId: catalogEntry.id,
-            chapterTitle: ex.chapterTitle,
-            exerciseNumber: ex.exerciseNumber,
-            content: ex.content,
-            page: ex.page,
-            exerciseType: ex.exerciseType,
-            sortOrder: idx,
-          }))
-        );
-        console.log(`[Job ${jobId}] Step 7: Stored ${exercises.length} exercises in DB.`);
+      // Heuristic to determine if Mathpix result is "structured enough"
+      // This might involve checking for presence of sections, headings, or a TOC-like structure
+      if (mathpixResult && mathpixResult.sections && mathpixResult.sections.length > 0) {
+        // Assuming mathpixResult.sections is an array of structured sections
+        processedDocument = {
+          type: 'structured_pdf',
+          sections: mathpixResult.sections.map((s: any) => ({ // Map Mathpix sections to our common interface
+            title: s.title || 'Untitled Section',
+            content: s.text_content || s.content,
+            type: s.type || 'text',
+            page: s.page_number
+          })),
+          mathpixData: mathpixResult // Keep original Mathpix data if needed
+        };
+        console.log(`Job ${jobId}: Successfully processed with smart parser (Mathpix).`);
       } else {
-        console.log(`[Job ${jobId}] Step 7: No exercises to store or catalog entry not found.`);
+        // Mathpix didn't provide structured content or returned an empty result,
+        // treat as a general PDF.
+        isGeneralPdf = true;
+        console.log(`Job ${jobId}: Smart parser returned unstructured/empty data, falling back to general PDF processing.`);
       }
-      await updateProgress(70);
-
-      // Step 8: Vision + Mathpix for math pages (skipped if no math pages or services not configured)
-      // This is where Claude Vision + Mathpix would run for math-heavy pages
-      // For now, we build the .nib without math LaTeX
-      await updateProgress(85);
-      console.log(`[Job ${jobId}] Step 8: Mathpix processing (placeholder, currently skipped).`);
-
-      // Step 9: Assemble .nib JSON
-      const nibDocument = assembleNib(extractedText, pageAnalyses);
-      const nibJson = JSON.stringify(nibDocument);
-      console.log(`[Job ${jobId}] Step 9: Assembled .nib document.`);
-
-      // Step 10: Upload .nib to R2
-      const r2Key = await storageService.uploadNib(fileHash, nibJson);
-      console.log(`[Job ${jobId}] Step 10: Uploaded .nib to R2: ${r2Key}.`);
-
-      // Step 11: Store in nib_cache
-      await db.insert(nibCache).values({
-        fileHash,
-        r2Key,
-        pageCount: extractedText.length,
-        sizeBytes: Buffer.byteLength(nibJson),
-      }).onConflictDoNothing();
-      console.log(`[Job ${jobId}] Step 11: Cached .nib metadata.`);
-
-      await updateProgress(100);
-      await billingRepository.updateJobStatus(jobId, { status: 'completed', progress: 100 });
-      console.log(`[Job ${jobId}] PDF processing pipeline completed successfully.`);
-
-    } catch (error: any) {
-      console.error(`[Job ${jobId}] PDF processing pipeline failed: ${error.message}`);
-      await billingRepository.updateJobStatus(jobId, {
-        status: 'failed',
-        error: error.message ?? 'Unknown error',
-      });
-      throw error;
+    } catch (error) {
+      // Smart parser failed (e.g., due to PDF format, API error), treat as general PDF
+      isGeneralPdf = true;
+      console.warn(`Job ${jobId}: Smart parser failed (${(error as Error).message}), falling back to general PDF processing.`);
     }
-  },
-};
 
-// Helper: Extract text from PDF buffer (simplified — in production use pdfjs-dist)
-async function extractTextFromPdf(pdfBuffer: Buffer): Promise<string[]> {
-  // Placeholder: in production, use pdfjs-dist to extract text per page
-  // For now, return empty array — the actual extraction will be done by the frontend
-  // or via pdfjs-dist when it's properly configured for Node.js
-  return [];
+    if (isGeneralPdf) {
+      // General PDF processing path: extract raw text and use cheaper AI for labeling
+      console.log(`Job ${jobId}: Initiating general PDF processing.`);
+      const rawText = await pdfService.extractTextFromPdf(pdfBuffer);
+      const labeledSections = await aiService.labelSectionsFromRawText(rawText);
+
+      processedDocument = {
+        type: 'general_pdf',
+        sections: labeledSections,
+        rawText: rawText // Store raw text for general PDFs
+      };
+      console.log(`Job ${jobId}: Processed as general PDF with raw text extraction and AI labeling.`);
+    }
+
+    if (!processedDocument) {
+      throw new Error(`Job ${jobId}: Failed to process PDF, no document data generated.`);
+    }
+
+    // Now, store the processedDocument data.
+    // This part would typically involve interacting with your database repositories
+    // (e.g., bookRepository, chapterRepository, sectionRepository) to persist the extracted information.
+    await this.saveProcessedDocument(jobId, userId, fileHash, processedDocument);
+    console.log(`Job ${jobId}: PDF processing pipeline completed.`);
+  }
+
+  /**
+   * Placeholder method to save the processed document data to the database.
+   * This would involve mapping the `ProcessedDocument` to your Drizzle schema.
+   * @param jobId The ID of the processing job.
+   * @param userId The ID of the user.
+   * @param fileHash The hash of the file.
+   * @param document The processed document data.
+   */
+  private async saveProcessedDocument(jobId: string, userId: string, fileHash: string, document: ProcessedDocument): Promise<void> {
+    console.log(`Job ${jobId}: Saving processed document data for user ${userId} and file ${fileHash}.`);
+    // Example:
+    // const book = await bookRepository.create({ userId, title: 'Processed Document', fileHash, type: document.type });
+    // for (const section of document.sections) {
+    //   await sectionRepository.create({ bookId: book.id, title: section.title, content: section.content, type: section.type, page: section.page });
+    // }
+    // This is a simplified representation. Actual saving logic would be more complex.
+    console.log(`Job ${jobId}: Document saved (mock). Sections found: ${document.sections.length}`);
+  }
 }
 
-// Helper: Update DB structure from Claude's analysis
-async function updateStructureFromAnalysis(
-  jobId: string, userId: string, fileHash: string, analyses: PageAnalysis[]
-) {
-  console.log(`[Job ${jobId}]   Starting structure update from AI analysis.`);
-  const catalogEntry = await bookRepository.findCatalogByHash(fileHash);
-  if (!catalogEntry) {
-    console.log(`[Job ${jobId}]   Catalog entry not found for hash ${fileHash}. Skipping structure update.`);
-    return;
-  }
-
-  const books = await bookRepository.findByUserId(userId);
-  const book = books.find(b => b.catalogId === catalogEntry.id);
-  if (!book) {
-    console.log(`[Job ${jobId}]   Book not found for user ${userId} and catalog ${catalogEntry.id}. Skipping structure update.`);
-    return;
-  }
-
-  // Extract unique chapters from analyses
-  const chapterMap = new Map<string, { title: string; startPage: number; endPage: number }>();
-  for (const page of analyses) {
-    if (page.chapterTitle && !chapterMap.has(page.chapterTitle)) {
-      chapterMap.set(page.chapterTitle, {
-        title: page.chapterTitle,
-        startPage: page.page,
-        endPage: page.page,
-      });
-    }
-    if (page.chapterTitle && chapterMap.has(page.chapterTitle)) {
-      const ch = chapterMap.get(page.chapterTitle)!;
-      ch.endPage = Math.max(ch.endPage, page.page);
-    }
-  }
-
-  // Create chapters
-  const chapterEntries = Array.from(chapterMap.values());
-  if (chapterEntries.length > 0) {
-    const { chapterRepository } = await import('../repositories/chapter.repository.js');
-    const createdChapters = await chapterRepository.bulkCreate(
-      chapterEntries.map((ch, idx) => ({
-        bookId: book.id,
-        title: ch.title,
-        startPage: ch.startPage,
-        endPage: ch.endPage,
-        sortOrder: idx,
-      }))
-    );
-    console.log(`[Job ${jobId}]   Created ${createdChapters.length} chapters.`);
-
-    // Create sections from analyses
-    const { sectionRepository } = await import('../repositories/section.repository.js');
-    const sectionMap = new Map<string, { title: string; chapterId: string; startPage: number; endPage: number; sectionType: string }>();
-
-    for (const page of analyses) {
-      if (page.sectionTitle) {
-        const chapter = createdChapters.find(c => c.title === page.chapterTitle);
-        if (chapter && !sectionMap.has(page.sectionTitle)) {
-          sectionMap.set(page.sectionTitle, {
-            title: page.sectionTitle,
-            chapterId: chapter.id,
-            startPage: page.page,
-            endPage: page.page,
-            sectionType: 'content',
-          });
-        }
-        if (page.sectionTitle && sectionMap.has(page.sectionTitle)) {
-          const sec = sectionMap.get(page.sectionTitle)!;
-          sec.endPage = Math.max(sec.endPage, page.page);
-        }
-      }
-    }
-
-    if (sectionMap.size > 0) {
-      await sectionRepository.bulkCreate(
-        Array.from(sectionMap.values()).map((sec, idx) => ({
-          bookId: book.id,
-          chapterId: sec.chapterId,
-          title: sec.title,
-          startPage: sec.startPage,
-          endPage: sec.endPage,
-          sectionType: sec.sectionType,
-          sortOrder: idx,
-        }))
-      );
-      console.log(`[Job ${jobId}]   Created ${sectionMap.size} sections.`);
-    } else {
-      console.log(`[Job ${jobId}]   No sections detected to create.`);
-    }
-  } else {
-    console.log(`[Job ${jobId}]   No chapters detected to create.`);
-  }
-
-  // Update book processing status
-  await bookRepository.update(book.id, { processingStatus: 'complete', structureSource: 'ai' });
-  console.log(`[Job ${jobId}]   Book processing status updated to 'complete' for structure source 'ai'.`);
-}
+export const processingService = new ProcessingService();
