@@ -1,227 +1,372 @@
 import { storageService } from './storage.service.js';
-import { aiService, type PageAnalysis } from './ai.service.js';
-import { mathpixService, type MathRegion } from './mathpix.service.js';
+import { pdfService, type OutlineItem } from './pdf.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
-import { exerciseRepository } from '../repositories/exercise.repository.js';
-import { billingRepository } from '../repositories/billing.repository.js';
+import { processingLogRepository } from '../repositories/processing-log.repository.js';
+import { chapterRepository } from '../repositories/chapter.repository.js';
+import { sectionRepository } from '../repositories/section.repository.js';
+import { NibParser } from '../lib/nib/parser.js';
 import { db } from '../db/index.js';
-import { nibCache, pdfFiles, chapters, sections } from '../db/schema.js';
+import { pdfFiles, sections, bookCatalog, books } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
+const parser = new NibParser();
+
 export const processingService = {
-  async orchestratePipeline(jobId: string, fileHash: string, userId: string): Promise<void> {
-    const job = await billingRepository.findJobById(jobId);
-    if (!job) throw new Error('Job not found');
-
+  /**
+   * 8-stage processing pipeline for a PDF book.
+   */
+  async orchestratePipeline(jobId: string, fileHash: string, bookId: string): Promise<void> {
     try {
-      // Update progress
-      const updateProgress = async (progress: number) => {
-        await billingRepository.updateJobStatus(jobId, { progress, status: 'processing' });
-      };
+      // ── Stage 1: Download PDF (0-5%) ──────────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 0, 'download');
+      await processingLogRepository.append(jobId, 'download', 'Downloading PDF from storage...');
 
-      // Step 1: Download PDF from R2
-      await updateProgress(5);
       const [pdfFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
-      if (!pdfFile) throw new Error('PDF not found in storage');
+      if (!pdfFile) throw new Error('PDF file not found in storage');
+
       const pdfBuffer = await storageService.downloadPdf(pdfFile.r2Key);
+      await processingLogRepository.updateJobProgress(jobId, 5, 'download');
+      await processingLogRepository.append(jobId, 'download', `PDF downloaded (${(pdfBuffer.length / 1024 / 1024).toFixed(1)} MB)`);
 
-      // Step 2: Extract text (using pdfjs-dist would go here in production)
-      // For now, we'll work with a placeholder text extraction
-      await updateProgress(15);
-      const extractedText = await extractTextFromPdf(pdfBuffer);
+      // ── Stage 2: Extract metadata (5-10%) ─────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 5, 'metadata');
+      await processingLogRepository.append(jobId, 'metadata', 'Extracting PDF metadata...');
 
-      // Step 3: Claude TEXT - structure classification (cheap, all pages)
-      await updateProgress(25);
-      const pageAnalyses = await aiService.classifyPages(extractedText);
+      const metadata = await pdfService.extractMetadata(pdfBuffer);
+      const totalPages = metadata.totalPages;
 
-      // Step 4: Update chapters/sections in DB from analysis
-      await updateProgress(40);
-      await updateStructureFromAnalysis(jobId, userId, fileHash, pageAnalyses);
+      await processingLogRepository.append(
+        jobId, 'metadata',
+        `Metadata extracted: ${totalPages} pages, title="${metadata.title ?? 'unknown'}", author="${metadata.author ?? 'unknown'}"`,
+      );
+      await processingLogRepository.updateJobProgress(jobId, 10, 'metadata');
 
-      // Step 5: Detect math pages (free, local)
-      const mathPages = aiService.detectMathPages(extractedText, pageAnalyses);
-      await updateProgress(50);
+      // ── Stage 3: Parse TOC (10-15%) ───────────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 10, 'toc');
+      await processingLogRepository.append(jobId, 'toc', 'Extracting table of contents...');
 
-      // Step 6: Extract exercises
-      const exercises = aiService.identifyExercises(pageAnalyses);
-      await updateProgress(60);
+      const outline = await pdfService.extractOutline(pdfBuffer);
+      const hasToc = outline.length > 0;
 
-      // Step 7: Store exercises in DB
-      const catalogEntry = await bookRepository.findCatalogByHash(fileHash);
-      if (catalogEntry && exercises.length > 0) {
-        await exerciseRepository.bulkCreate(
-          exercises.map((ex, idx) => ({
-            catalogId: catalogEntry.id,
-            chapterTitle: ex.chapterTitle,
-            exerciseNumber: ex.exerciseNumber,
-            content: ex.content,
-            page: ex.page,
-            exerciseType: ex.exerciseType,
-            sortOrder: idx,
-          }))
-        );
+      await processingLogRepository.append(
+        jobId, 'toc',
+        hasToc
+          ? `TOC found with ${outline.length} top-level entries`
+          : 'No TOC found — will use batch structure',
+      );
+      await processingLogRepository.updateJobProgress(jobId, 15, 'toc');
+
+      // ── Stage 4: Build structure (15-20%) ─────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 15, 'structure');
+      await processingLogRepository.append(jobId, 'structure', 'Building chapter/section structure...');
+
+      if (hasToc) {
+        await buildStructureFromOutline(jobId, bookId, pdfBuffer, outline, totalPages);
+      } else {
+        await buildBatchStructure(jobId, bookId, totalPages);
       }
-      await updateProgress(70);
 
-      // Step 8: Vision + Mathpix for math pages (skipped if no math pages or services not configured)
-      // This is where Claude Vision + Mathpix would run for math-heavy pages
-      // For now, we build the .nib without math LaTeX
-      await updateProgress(85);
+      await processingLogRepository.updateJobProgress(jobId, 20, 'structure');
+      await processingLogRepository.append(jobId, 'structure', 'Structure built successfully');
 
-      // Step 9: Assemble .nib JSON
-      const nibDocument = assembleNib(extractedText, pageAnalyses);
-      const nibJson = JSON.stringify(nibDocument);
+      // ── Stage 5: Extract text (20-80%) ────────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 20, 'text_extraction');
+      await processingLogRepository.append(jobId, 'text_extraction', 'Starting text extraction...');
 
-      // Step 10: Upload .nib to R2
-      const r2Key = await storageService.uploadNib(fileHash, nibJson);
+      const allSections = await sectionRepository.findByBookId(bookId);
+      const totalSections = allSections.length;
 
-      // Step 11: Store in nib_cache
-      await db.insert(nibCache).values({
-        fileHash,
-        r2Key,
-        pageCount: extractedText.length,
-        sizeBytes: Buffer.byteLength(nibJson),
-      }).onConflictDoNothing();
+      for (let i = 0; i < totalSections; i++) {
+        const section = allSections[i];
+        const startPage = section.startPage ?? 1;
+        const endPage = section.endPage ?? startPage;
 
-      await updateProgress(100);
-      await billingRepository.updateJobStatus(jobId, { status: 'completed', progress: 100 });
+        let sectionText = '';
+        for (let page = startPage; page <= endPage; page++) {
+          try {
+            const rawPageData = await pdfService.extractRichPageData(pdfBuffer, page);
+            // Convert to NibParser's expected format
+            const parserInput = {
+              pageNumber: rawPageData.pageNumber,
+              items: rawPageData.items.map(item => ({
+                str: item.text,
+                transform: item.transform,
+                width: item.width,
+                height: item.height,
+                fontName: item.fontName,
+                hasEOL: item.hasEOL,
+              })),
+              pageHeight: rawPageData.height,
+              pageWidth: rawPageData.width,
+            };
+            const nibPage = parser.parsePage(parserInput);
+            const pageText = nibPage.paragraphs
+              .map(p => p.sentences.map(s => s.words.map(w => w.text).join(' ')).join(' '))
+              .join('\n\n');
+            sectionText += (sectionText ? '\n\n' : '') + pageText;
+          } catch (err: any) {
+            await processingLogRepository.append(
+              jobId, 'text_extraction',
+              `Warning: failed to extract page ${page}: ${err.message}`,
+              'warn',
+            );
+          }
+        }
+
+        // Write extracted text to section
+        if (sectionText.trim()) {
+          await sectionRepository.update(section.id, { extractedText: sectionText.trim() });
+        }
+
+        // Update progress (20% to 80% range)
+        const progress = Math.round(20 + ((i + 1) / totalSections) * 60);
+        await processingLogRepository.updateJobProgress(jobId, progress, 'text_extraction');
+
+        if ((i + 1) % 5 === 0 || i === totalSections - 1) {
+          await processingLogRepository.append(
+            jobId, 'text_extraction',
+            `Extracted text for ${i + 1}/${totalSections} sections`,
+          );
+        }
+      }
+
+      // ── Stage 6: OCR fallback (80-90%) ────────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 80, 'ocr');
+      await processingLogRepository.append(jobId, 'ocr', 'Checking for sections needing OCR...');
+
+      const updatedSections = await sectionRepository.findByBookId(bookId);
+      const emptySections = updatedSections.filter(s => !s.extractedText || s.extractedText.trim().length < 20);
+
+      if (emptySections.length > 0) {
+        await processingLogRepository.append(
+          jobId, 'ocr',
+          `Found ${emptySections.length} sections with insufficient text — running OCR...`,
+        );
+
+        for (let i = 0; i < emptySections.length; i++) {
+          const section = emptySections[i];
+          const startPage = section.startPage ?? 1;
+          const endPage = section.endPage ?? startPage;
+
+          let ocrText = '';
+          for (let page = startPage; page <= endPage; page++) {
+            try {
+              const imageBuffer = await pdfService.renderPageToImage(pdfBuffer, page, 2.0);
+              const base64Image = imageBuffer.toString('base64');
+
+              const { default: Anthropic } = await import('@anthropic-ai/sdk');
+              const client = new Anthropic();
+              const response = await client.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 4096,
+                messages: [{
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'image',
+                      source: {
+                        type: 'base64',
+                        media_type: 'image/png',
+                        data: base64Image,
+                      },
+                    },
+                    {
+                      type: 'text',
+                      text: 'Extract all readable text from this page image. Return only the text content, preserving paragraph structure. Do not add any commentary.',
+                    },
+                  ],
+                }],
+              });
+
+              const textBlock = response.content.find(b => b.type === 'text');
+              if (textBlock && textBlock.type === 'text') {
+                ocrText += (ocrText ? '\n\n' : '') + textBlock.text;
+              }
+            } catch (err: any) {
+              await processingLogRepository.append(
+                jobId, 'ocr',
+                `Warning: OCR failed for page ${page}: ${err.message}`,
+                'warn',
+              );
+            }
+          }
+
+          if (ocrText.trim()) {
+            await sectionRepository.update(section.id, { extractedText: ocrText.trim() });
+          }
+
+          const progress = Math.round(80 + ((i + 1) / emptySections.length) * 10);
+          await processingLogRepository.updateJobProgress(jobId, progress, 'ocr');
+        }
+
+        await processingLogRepository.append(jobId, 'ocr', `OCR completed for ${emptySections.length} sections`);
+      } else {
+        await processingLogRepository.append(jobId, 'ocr', 'No sections need OCR — all have text');
+      }
+
+      await processingLogRepository.updateJobProgress(jobId, 90, 'ocr');
+
+      // ── Stage 7: Generate cover (90-95%) ──────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 90, 'cover');
+      await processingLogRepository.append(jobId, 'cover', 'Checking cover image...');
+
+      const catalog = await bookRepository.findCatalogByHash(fileHash);
+      if (catalog && !catalog.coverUrl) {
+        try {
+          const coverBuffer = await pdfService.renderPageToImage(pdfBuffer, 1, 2.0);
+          const coverBase64 = `data:image/png;base64,${coverBuffer.toString('base64')}`;
+
+          await bookRepository.updateCatalog(catalog.id, { coverUrl: coverBase64 });
+          await processingLogRepository.append(jobId, 'cover', 'Cover generated from page 1');
+        } catch (err: any) {
+          await processingLogRepository.append(
+            jobId, 'cover',
+            `Warning: cover generation failed: ${err.message}`,
+            'warn',
+          );
+        }
+      } else {
+        await processingLogRepository.append(jobId, 'cover', 'Cover already exists — skipping');
+      }
+
+      await processingLogRepository.updateJobProgress(jobId, 95, 'cover');
+
+      // ── Stage 8: Finalize (95-100%) ───────────────────────────────
+      await processingLogRepository.updateJobProgress(jobId, 95, 'finalize');
+      await processingLogRepository.append(jobId, 'finalize', 'Finalizing processing...');
+
+      await bookRepository.update(bookId, { processingStatus: 'complete', structureSource: 'ai' });
+      await processingLogRepository.completeJob(jobId);
+      await processingLogRepository.append(jobId, 'finalize', 'Processing complete!');
 
     } catch (error: any) {
-      await billingRepository.updateJobStatus(jobId, {
-        status: 'failed',
-        error: error.message ?? 'Unknown error',
-      });
+      const errorMessage = error.message ?? 'Unknown error';
+      await processingLogRepository.append(jobId, 'error', `Pipeline failed: ${errorMessage}`, 'error');
+      await processingLogRepository.failJob(jobId, errorMessage);
+      await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
       throw error;
     }
   },
 };
 
-// Helper: Extract text from PDF buffer (simplified — in production use pdfjs-dist)
-async function extractTextFromPdf(pdfBuffer: Buffer): Promise<string[]> {
-  // Placeholder: in production, use pdfjs-dist to extract text per page
-  // For now, return empty array — the actual extraction will be done by the frontend
-  // or via pdfjs-dist when it's properly configured for Node.js
-  return [];
-}
+// ─── Helper: Build structure from PDF outline/TOC ───────────────────────────
 
-// Helper: Update DB structure from Claude's analysis
-async function updateStructureFromAnalysis(
-  jobId: string, userId: string, fileHash: string, analyses: PageAnalysis[]
-) {
-  const catalogEntry = await bookRepository.findCatalogByHash(fileHash);
-  if (!catalogEntry) return;
+async function buildStructureFromOutline(
+  jobId: string,
+  bookId: string,
+  pdfBuffer: Buffer,
+  outline: OutlineItem[],
+  totalPages: number,
+): Promise<void> {
+  let globalSortOrder = 0;
 
-  const books = await bookRepository.findByUserId(userId);
-  const book = books.find(b => b.catalogId === catalogEntry.id);
-  if (!book) return;
+  async function processOutlineItems(
+    items: OutlineItem[],
+    parentChapterId: string | null,
+    depth: number,
+  ): Promise<void> {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const startPage = item.pageNumber ?? 1;
 
-  // Extract unique chapters from analyses
-  const chapterMap = new Map<string, { title: string; startPage: number; endPage: number }>();
-  for (const page of analyses) {
-    if (page.chapterTitle && !chapterMap.has(page.chapterTitle)) {
-      chapterMap.set(page.chapterTitle, {
-        title: page.chapterTitle,
-        startPage: page.page,
-        endPage: page.page,
-      });
-    }
-    if (page.chapterTitle && chapterMap.has(page.chapterTitle)) {
-      const ch = chapterMap.get(page.chapterTitle)!;
-      ch.endPage = Math.max(ch.endPage, page.page);
-    }
-  }
+      // Determine endPage: next sibling's startPage - 1, or totalPages
+      let endPage: number;
+      if (i + 1 < items.length && items[i + 1].pageNumber) {
+        endPage = items[i + 1].pageNumber! - 1;
+      } else {
+        endPage = totalPages;
+      }
+      // Ensure endPage >= startPage
+      endPage = Math.max(endPage, startPage);
 
-  // Create chapters
-  const chapterEntries = Array.from(chapterMap.values());
-  if (chapterEntries.length > 0) {
-    const { chapterRepository } = await import('../repositories/chapter.repository.js');
-    const createdChapters = await chapterRepository.bulkCreate(
-      chapterEntries.map((ch, idx) => ({
-        bookId: book.id,
-        title: ch.title,
-        startPage: ch.startPage,
-        endPage: ch.endPage,
-        sortOrder: idx,
-      }))
-    );
+      if (depth === 0) {
+        // Top-level items become chapters
+        const chapter = await chapterRepository.create({
+          bookId,
+          title: item.title,
+          startPage,
+          endPage,
+          sortOrder: globalSortOrder++,
+        });
 
-    // Create sections from analyses
-    const { sectionRepository } = await import('../repositories/section.repository.js');
-    const sectionMap = new Map<string, { title: string; chapterId: string; startPage: number; endPage: number; sectionType: string }>();
+        await processingLogRepository.append(
+          jobId, 'structure',
+          `Chapter: "${item.title}" (pages ${startPage}-${endPage})`,
+        );
 
-    for (const page of analyses) {
-      if (page.sectionTitle) {
-        const chapter = createdChapters.find(c => c.title === page.chapterTitle);
-        if (chapter && !sectionMap.has(page.sectionTitle)) {
-          sectionMap.set(page.sectionTitle, {
-            title: page.sectionTitle,
+        if (item.children.length > 0) {
+          // Children become sections within this chapter
+          await processOutlineItems(item.children, chapter.id, depth + 1);
+        } else {
+          // No children: create a single section for the whole chapter
+          await sectionRepository.create({
+            bookId,
             chapterId: chapter.id,
-            startPage: page.page,
-            endPage: page.page,
+            title: item.title,
+            startPage,
+            endPage,
             sectionType: 'content',
+            sortOrder: 0,
           });
         }
-        if (page.sectionTitle && sectionMap.has(page.sectionTitle)) {
-          const sec = sectionMap.get(page.sectionTitle)!;
-          sec.endPage = Math.max(sec.endPage, page.page);
+      } else if (parentChapterId) {
+        // Nested items become sections
+        await sectionRepository.create({
+          bookId,
+          chapterId: parentChapterId,
+          title: item.title,
+          startPage,
+          endPage,
+          sectionType: 'content',
+          sortOrder: globalSortOrder++,
+        });
+
+        // If there are deeper children, we still create sections (flatten)
+        if (item.children.length > 0) {
+          await processOutlineItems(item.children, parentChapterId, depth + 1);
         }
       }
     }
-
-    if (sectionMap.size > 0) {
-      await sectionRepository.bulkCreate(
-        Array.from(sectionMap.values()).map((sec, idx) => ({
-          bookId: book.id,
-          chapterId: sec.chapterId,
-          title: sec.title,
-          startPage: sec.startPage,
-          endPage: sec.endPage,
-          sectionType: sec.sectionType,
-          sortOrder: idx,
-        }))
-      );
-    }
   }
 
-  // Update book processing status
-  await bookRepository.update(book.id, { processingStatus: 'complete', structureSource: 'ai' });
+  await processOutlineItems(outline, null, 0);
 }
 
-// Helper: Assemble .nib JSON structure
-function assembleNib(extractedText: string[], analyses: PageAnalysis[]) {
-  const pages = extractedText.map((text, idx) => {
-    const pageNum = idx + 1;
-    const analysis = analyses.find(a => a.page === pageNum);
+// ─── Helper: Build batch structure when no TOC is available ─────────────────
 
-    // Split text into paragraphs
-    const paragraphs = text.split(/\n\n+/).filter(p => p.trim()).map((paraText, pIdx) => {
-      const sentences = paraText.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-      const block = analysis?.blocks.find(b => b.startLine <= pIdx && b.endLine >= pIdx);
+async function buildBatchStructure(
+  jobId: string,
+  bookId: string,
+  totalPages: number,
+): Promise<void> {
+  const batchSize = 10;
+  const numBatches = Math.ceil(totalPages / batchSize);
 
-      return {
-        index: pIdx,
-        blockType: block?.type ?? 'body',
-        sentences: sentences.map((sentText, sIdx) => ({
-          index: sIdx,
-          words: sentText.split(/\s+/).filter(w => w).map((wordText, wIdx) => ({
-            index: wIdx,
-            text: wordText,
-          })),
-        })),
-      };
+  for (let i = 0; i < numBatches; i++) {
+    const startPage = i * batchSize + 1;
+    const endPage = Math.min((i + 1) * batchSize, totalPages);
+
+    const chapter = await chapterRepository.create({
+      bookId,
+      title: `Pages ${startPage}–${endPage}`,
+      startPage,
+      endPage,
+      sortOrder: i,
     });
 
-    return {
-      pageNumber: pageNum,
-      paragraphs,
-      chapterTitle: analysis?.chapterTitle,
-      sectionTitle: analysis?.sectionTitle,
-    };
-  });
+    await sectionRepository.create({
+      bookId,
+      chapterId: chapter.id,
+      title: `Pages ${startPage}–${endPage}`,
+      startPage,
+      endPage,
+      sectionType: 'content',
+      sortOrder: 0,
+    });
+  }
 
-  return {
-    version: 1,
-    pageCount: pages.length,
-    pages,
-  };
+  await processingLogRepository.append(
+    jobId, 'structure',
+    `Created ${numBatches} batch chapters (${batchSize} pages each)`,
+  );
 }
