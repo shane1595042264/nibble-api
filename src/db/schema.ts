@@ -205,8 +205,10 @@ export const processingJobs = pgTable('processing_jobs', {
   id: uuid('id').primaryKey().defaultRandom(),
   fileHash: text('file_hash').notNull(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  bookId: uuid('book_id').references(() => books.id),
   status: text('status').notNull().default('pending'),
   progress: integer('progress').notNull().default(0),
+  stage: text('stage'),
   processingCostCents: integer('processing_cost_cents'),
   paid: boolean('paid').notNull().default(false),
   stripePaymentIntentId: text('stripe_payment_intent_id'),
@@ -215,6 +217,18 @@ export const processingJobs = pgTable('processing_jobs', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   index('idx_processing_jobs_status').on(table.status, table.createdAt),
+]);
+
+// ============ PROCESSING LOGS ============
+export const processingLogs = pgTable('processing_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  jobId: uuid('job_id').notNull().references(() => processingJobs.id, { onDelete: 'cascade' }),
+  timestamp: timestamp('timestamp').notNull().defaultNow(),
+  level: text('level').notNull().default('info'),
+  stage: text('stage').notNull(),
+  message: text('message').notNull(),
+}, (table) => [
+  index('idx_processing_logs_job_id').on(table.jobId),
 ]);
 
 // ============ PROCESSING CHARGES (billing ledger) ============
