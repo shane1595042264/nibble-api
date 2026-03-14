@@ -78,8 +78,15 @@ export const bookRepository = {
     return deleted ?? null;
   },
 
-  /** Hard delete book + chapters + sections + vocab. Catalog entry (marketplace) is preserved. */
+  /** Hard delete book + chapters + sections + vocab + processing jobs/logs. Catalog entry (marketplace) is preserved. */
   async hardDelete(id: string) {
+    // Delete processing logs first (FK → processing_jobs)
+    const { processingJobs, processingLogs } = await import('../db/schema.js');
+    const jobs = await db.select({ id: processingJobs.id }).from(processingJobs).where(eq(processingJobs.bookId, id));
+    for (const job of jobs) {
+      await db.delete(processingLogs).where(eq(processingLogs.jobId, job.id));
+    }
+    await db.delete(processingJobs).where(eq(processingJobs.bookId, id));
     await db.delete(sections).where(eq(sections.bookId, id));
     await db.delete(chapters).where(eq(chapters.bookId, id));
     await db.delete(vocabulary).where(eq(vocabulary.bookId, id));

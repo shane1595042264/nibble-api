@@ -46,16 +46,19 @@ function isValidUuid(s: unknown): boolean {
   return typeof s === 'string' && UUID_RE.test(s);
 }
 
-/** Convert string timestamps in an entity to Date objects for Drizzle */
+/** Convert any timestamp-like values in an entity to Date objects for Drizzle.
+ *  Handles strings, numbers (epoch ms), and null/undefined gracefully. */
 function coerceDates(entity: Record<string, unknown>): Record<string, unknown> {
-  const dateFields = ['createdAt', 'updatedAt', 'deletedAt', 'readAt', 'lastReadAt', 'lastReviewedAt', 'completedAt'];
   const result = { ...entity };
-  for (const field of dateFields) {
-    const val = result[field];
-    if (val && typeof val === 'string') {
-      result[field] = new Date(val);
-    } else if (val && typeof val === 'number') {
-      result[field] = new Date(val);
+  for (const [key, val] of Object.entries(result)) {
+    // Skip non-timestamp fields
+    if (!key.endsWith('At') && key !== 'deletedAt') continue;
+    if (val === null || val === undefined) continue;
+    if (val instanceof Date) continue;
+    if (typeof val === 'string') {
+      result[key] = new Date(val);
+    } else if (typeof val === 'number') {
+      result[key] = new Date(val);
     }
   }
   return result;
