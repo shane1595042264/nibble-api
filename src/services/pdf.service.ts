@@ -76,12 +76,21 @@ export const pdfService = {
       const outline = await doc.getOutline();
       if (!outline) return [];
 
-      async function processItems(items: any[]): Promise<OutlineItem[]> {
+      async function processItems(items: any[], depth = 0): Promise<OutlineItem[]> {
+        if (depth > 3) return []; // Limit depth to avoid hanging on deep trees
         const result: OutlineItem[] = [];
         for (const item of items) {
-          const pageNumber = await resolveDestToPage(doc, item.dest);
+          let pageNumber: number | null = null;
+          try {
+            // Timeout each destination resolve to 2 seconds
+            pageNumber = await Promise.race([
+              resolveDestToPage(doc, item.dest),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+            ]);
+          } catch { /* skip unresolvable destinations */ }
+
           const children = item.items?.length
-            ? await processItems(item.items)
+            ? await processItems(item.items, depth + 1)
             : [];
           result.push({
             title: item.title,
@@ -92,7 +101,12 @@ export const pdfService = {
         return result;
       }
 
-      return processItems(outline);
+      // Timeout the entire outline extraction to 30 seconds
+      const result = await Promise.race([
+        processItems(outline),
+        new Promise<OutlineItem[]>((resolve) => setTimeout(() => resolve([]), 30000)),
+      ]);
+      return result;
     } finally {
       await doc.destroy();
     }
