@@ -28,22 +28,32 @@ export const userRepository = {
     role: string;
     googleId?: string;
   }) {
+    // Use the provided googleId, or fall back to 'sub' if 'sub' is expected to be the Google ID.
+    // This ensures googleId is populated for Google sign-ups even if not explicitly passed as 'googleId'.
+    const effectiveGoogleId = data.googleId || data.sub;
+
     const existing = await this.findByEmail(data.email);
     if (existing) {
-      if (data.googleId && !existing.googleId) {
-        await db
+      // If an existing user is found by email, update their googleId if it's missing
+      // and we have an effectiveGoogleId from the JWT data.
+      if (effectiveGoogleId && !existing.googleId) {
+        const [updatedUser] = await db
           .update(users)
-          .set({ googleId: data.googleId })
-          .where(eq(users.id, existing.id));
+          .set({ googleId: effectiveGoogleId })
+          .where(eq(users.id, existing.id))
+          .returning(); // Return the updated user object
+        return updatedUser || existing; // Return updated user if available, else existing
       }
       return existing;
     }
+
+    // If no existing user is found by email, create a new one.
     const [created] = await db
       .insert(users)
       .values({
         email: data.email,
         name: data.name,
-        googleId: data.googleId,
+        googleId: effectiveGoogleId, // Use effectiveGoogleId for creation
         authRole: data.role,
       })
       .returning();
