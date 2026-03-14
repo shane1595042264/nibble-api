@@ -270,6 +270,94 @@ export const processingService = {
 };
 
 // ─── Helper: Build structure from PDF outline/TOC ───────────────────────────
+// Ported from frontend's buildStructureFromOutline + walkOutlineTree + flattenOutline
+// This is the battle-tested logic that handles:
+// - Chapter vs section detection based on nesting
+// - Introduction injection when parent starts before first child
+// - Prefix notation for deep nesting ("Part 1 > Chapter 1")
+// - Mixed leaf/nested children
+// - Page range computation using flattened leaf list
+
+interface ChapterSections {
+  chapterTitle: string;
+  sections: { title: string; pageNumber: number | null }[];
+}
+
+function walkOutlineTree(
+  items: OutlineItem[],
+  parentPrefix: string,
+  result: ChapterSections[],
+): void {
+  for (const item of items) {
+    const children = item.children || [];
+    if (children.length === 0) {
+      // Leaf node → standalone chapter with one section
+      result.push({
+        chapterTitle: item.title,
+        sections: [{ title: item.title, pageNumber: item.pageNumber }],
+      });
+    } else if (children.every(c => !c.children || c.children.length === 0)) {
+      // All children are leaves → this is a chapter, children are sections
+      const title = parentPrefix ? `${parentPrefix} > ${item.title}` : item.title;
+      const sections: { title: string; pageNumber: number | null }[] = [];
+
+      // Inject "Introduction" section if parent starts before first child
+      const firstChildPage = children[0]?.pageNumber ?? null;
+      if (
+        item.pageNumber != null &&
+        firstChildPage != null &&
+        item.pageNumber < firstChildPage
+      ) {
+        sections.push({
+          title: `${item.title} — Introduction`,
+          pageNumber: item.pageNumber,
+        });
+      }
+
+      for (const c of children) {
+        sections.push({ title: c.title, pageNumber: c.pageNumber });
+      }
+
+      result.push({ chapterTitle: title, sections });
+    } else {
+      // Has nested children → grouping level, recurse
+      const prefix = parentPrefix ? `${parentPrefix} > ${item.title}` : item.title;
+      const directLeaves = children.filter(c => !c.children || c.children.length === 0);
+      const nestedChildren = children.filter(c => c.children && c.children.length > 0);
+
+      // Inject "Introduction" if parent starts before first child
+      const allChildren = [...directLeaves, ...nestedChildren];
+      const firstPage = allChildren.reduce((min: number | null, c) => {
+        if (c.pageNumber == null) return min;
+        if (min == null) return c.pageNumber;
+        return c.pageNumber < min ? c.pageNumber : min;
+      }, null as number | null);
+
+      const introSections: { title: string; pageNumber: number | null }[] = [];
+      if (
+        item.pageNumber != null &&
+        firstPage != null &&
+        item.pageNumber < firstPage
+      ) {
+        introSections.push({
+          title: `${item.title} — Introduction`,
+          pageNumber: item.pageNumber,
+        });
+      }
+
+      if (directLeaves.length > 0 || introSections.length > 0) {
+        result.push({
+          chapterTitle: prefix,
+          sections: [
+            ...introSections,
+            ...directLeaves.map(c => ({ title: c.title, pageNumber: c.pageNumber })),
+          ],
+        });
+      }
+      walkOutlineTree(nestedChildren, prefix, result);
+    }
+  }
+}
 
 async function buildStructureFromOutline(
   jobId: string,
@@ -278,78 +366,89 @@ async function buildStructureFromOutline(
   outline: OutlineItem[],
   totalPages: number,
 ): Promise<void> {
-  let globalSortOrder = 0;
+  // Walk tree to get chapter/section pairs (mirrors frontend exactly)
+  const result: ChapterSections[] = [];
+  walkOutlineTree(outline, '', result);
 
-  async function processOutlineItems(
-    items: OutlineItem[],
-    parentChapterId: string | null,
-    depth: number,
-  ): Promise<void> {
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const startPage = item.pageNumber ?? 1;
+  // Build flat ordered list of ALL leaf sections for page range computation
+  const allLeaves: { title: string; pageNumber: number | null; chapterIdx: number; sectionIdx: number }[] = [];
+  result.forEach((ch, ci) => {
+    ch.sections.forEach((s, si) => {
+      allLeaves.push({ title: s.title, pageNumber: s.pageNumber, chapterIdx: ci, sectionIdx: si });
+    });
+  });
 
-      // Determine endPage: next sibling's startPage - 1, or totalPages
-      let endPage: number;
-      if (i + 1 < items.length && items[i + 1].pageNumber) {
-        endPage = items[i + 1].pageNumber! - 1;
-      } else {
-        endPage = totalPages;
-      }
-      // Ensure endPage >= startPage
-      endPage = Math.max(endPage, startPage);
+  let chapterOrder = 0;
+  let sectionOrder = 0;
 
-      if (depth === 0) {
-        // Top-level items become chapters
-        const chapter = await chapterRepository.create({
-          bookId,
-          title: item.title,
-          startPage,
-          endPage,
-          sortOrder: globalSortOrder++,
-        });
+  for (let ci = 0; ci < result.length; ci++) {
+    const ch = result[ci];
 
-        await processingLogRepository.append(
-          jobId, 'structure',
-          `Chapter: "${item.title}" (pages ${startPage}-${endPage})`,
-        );
+    // Compute chapter page range from its sections
+    const chapterSections = allLeaves.filter(l => l.chapterIdx === ci);
+    const firstPage = chapterSections[0]?.pageNumber ?? 1;
 
-        if (item.children.length > 0) {
-          // Children become sections within this chapter
-          await processOutlineItems(item.children, chapter.id, depth + 1);
+    // Find next section AFTER this chapter to determine endPage
+    const lastSectionGlobalIdx = allLeaves.findIndex(
+      l => l.chapterIdx === ci && l.sectionIdx === ch.sections.length - 1
+    );
+    const nextLeaf = allLeaves[lastSectionGlobalIdx + 1];
+    const endPage = nextLeaf?.pageNumber != null
+      ? nextLeaf.pageNumber - 1
+      : totalPages;
+
+    const chapter = await chapterRepository.create({
+      bookId,
+      title: ch.chapterTitle,
+      startPage: firstPage,
+      endPage: Math.max(firstPage, endPage),
+      sortOrder: ++chapterOrder,
+    });
+
+    await processingLogRepository.append(
+      jobId, 'structure',
+      `Chapter: "${ch.chapterTitle}" (pages ${firstPage}-${Math.max(firstPage, endPage)}, ${ch.sections.length} sections)`,
+    );
+
+    // Create sections with computed page ranges
+    for (let si = 0; si < ch.sections.length; si++) {
+      const sec = ch.sections[si];
+      const startPage = sec.pageNumber ?? firstPage;
+
+      // Next section's page determines this section's end
+      const nextSec = ch.sections[si + 1];
+      let secEndPage: number;
+      if (nextSec?.pageNumber != null) {
+        secEndPage = nextSec.pageNumber - 1;
+      } else if (si === ch.sections.length - 1) {
+        // Last section in chapter — find next chapter's start
+        const nextChSections = result[ci + 1]?.sections;
+        if (nextChSections?.[0]?.pageNumber != null) {
+          secEndPage = nextChSections[0].pageNumber - 1;
         } else {
-          // No children: create a single section for the whole chapter
-          await sectionRepository.create({
-            bookId,
-            chapterId: chapter.id,
-            title: item.title,
-            startPage,
-            endPage,
-            sectionType: 'content',
-            sortOrder: 0,
-          });
+          secEndPage = Math.max(firstPage, endPage);
         }
-      } else if (parentChapterId) {
-        // Nested items become sections
-        await sectionRepository.create({
-          bookId,
-          chapterId: parentChapterId,
-          title: item.title,
-          startPage,
-          endPage,
-          sectionType: 'content',
-          sortOrder: globalSortOrder++,
-        });
-
-        // If there are deeper children, we still create sections (flatten)
-        if (item.children.length > 0) {
-          await processOutlineItems(item.children, parentChapterId, depth + 1);
-        }
+      } else {
+        secEndPage = Math.max(firstPage, endPage);
       }
+      secEndPage = Math.max(startPage, secEndPage);
+
+      await sectionRepository.create({
+        bookId,
+        chapterId: chapter.id,
+        title: sec.title,
+        startPage,
+        endPage: secEndPage,
+        sectionType: 'content',
+        sortOrder: ++sectionOrder,
+      });
     }
   }
 
-  await processOutlineItems(outline, null, 0);
+  await processingLogRepository.append(
+    jobId, 'structure',
+    `Created ${result.length} chapters with ${allLeaves.length} sections from TOC`,
+  );
 }
 
 // ─── Helper: Build batch structure when no TOC is available ─────────────────
