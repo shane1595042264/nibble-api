@@ -37,6 +37,20 @@ export const processingService = {
       await updateProgress(25);
       const pageAnalyses = await aiService.classifyPages(extractedText);
       console.log(`[Job ${jobId}] Step 3: AI classified ${pageAnalyses.length} pages for structure.`);
+      // Enhanced logging for detected components
+      const chapterPages = pageAnalyses.filter(p => p.chapterTitle).map(p => p.page);
+      const sectionPages = pageAnalyses.filter(p => p.sectionTitle).map(p => p.page);
+      const exercisePages = pageAnalyses.filter(p => p.exercise).map(p => p.page);
+      if (chapterPages.length > 0) {
+        console.log(`[Job ${jobId}]   Detected chapters on pages: ${chapterPages.join(', ')}`);
+      }
+      if (sectionPages.length > 0) {
+        console.log(`[Job ${jobId}]   Detected sections on pages: ${sectionPages.join(', ')}`);
+      }
+      if (exercisePages.length > 0) {
+        console.log(`[Job ${jobId}]   Detected exercises on pages: ${exercisePages.join(', ')}`);
+      }
+
 
       // Step 4: Update chapters/sections in DB from analysis
       await updateProgress(40);
@@ -47,11 +61,22 @@ export const processingService = {
       const mathPages = aiService.detectMathPages(extractedText, pageAnalyses);
       await updateProgress(50);
       console.log(`[Job ${jobId}] Step 5: Detected ${mathPages.length} math-heavy pages.`);
+      if (mathPages.length > 0) {
+        console.log(`[Job ${jobId}]   Math-heavy pages: ${mathPages.join(', ')}`);
+      }
 
       // Step 6: Extract exercises
       const exercises = aiService.identifyExercises(pageAnalyses);
       await updateProgress(60);
       console.log(`[Job ${jobId}] Step 6: Identified ${exercises.length} exercises.`);
+      if (exercises.length > 0) {
+        exercises.slice(0, 5).forEach((ex, index) => { // Log first 5 exercises for brevity
+          console.log(`[Job ${jobId}]   Exercise ${index + 1}: Chapter "${ex.chapterTitle}", Page ${ex.page}, Type "${ex.exerciseType}"`);
+        });
+        if (exercises.length > 5) {
+          console.log(`[Job ${jobId}]   ...and ${exercises.length - 5} more exercises.`);
+        }
+      }
 
       // Step 7: Store exercises in DB
       const catalogEntry = await bookRepository.findCatalogByHash(fileHash);
@@ -167,7 +192,7 @@ async function updateStructureFromAnalysis(
         sortOrder: idx,
       }))
     );
-    console.log(`[Job ${jobId}]   Created ${createdChapters.length} chapters.`);
+    console.log(`[Job ${jobId}]   Created ${createdChapters.length} chapters: ${createdChapters.map(c => `"${c.title}" (pages ${c.startPage}-${c.endPage})`).join(', ')}.`);
 
     // Create sections from analyses
     const { sectionRepository } = await import('../repositories/section.repository.js');
@@ -193,7 +218,7 @@ async function updateStructureFromAnalysis(
     }
 
     if (sectionMap.size > 0) {
-      await sectionRepository.bulkCreate(
+      const createdSections = await sectionRepository.bulkCreate(
         Array.from(sectionMap.values()).map((sec, idx) => ({
           bookId: book.id,
           chapterId: sec.chapterId,
@@ -204,7 +229,7 @@ async function updateStructureFromAnalysis(
           sortOrder: idx,
         }))
       );
-      console.log(`[Job ${jobId}]   Created ${sectionMap.size} sections.`);
+      console.log(`[Job ${jobId}]   Created ${createdSections.length} sections: ${createdSections.map(s => `"${s.title}" (pages ${s.startPage}-${s.endPage})`).join(', ')}.`);
     } else {
       console.log(`[Job ${jobId}]   No sections detected to create.`);
     }
