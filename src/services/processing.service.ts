@@ -1,10 +1,12 @@
 import { storageService } from './storage.service.js';
-import { pdfService, type OutlineItem } from './pdf.service.js';
+import { pdfService } from './pdf.service.js';
+import type { OutlineItem } from './pdf.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { chapterRepository } from '../repositories/chapter.repository.js';
 import { sectionRepository } from '../repositories/section.repository.js';
 import { NibParser } from '../lib/nib/parser.js';
+import { NibDocument } from '../lib/nib/models.js';
 import { db } from '../db/index.js';
 import { pdfFiles, sections, chapters, bookCatalog, books } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -56,7 +58,7 @@ export const processingService = {
       await processingLogRepository.append(jobId, 'toc', 'Extracting table of contents...');
 
       const outline = await pdfService.extractOutlineFromDoc(doc);
-      const hasToc = outline.length > 0;
+      const hasToc = outline !== null && outline.length > 0;
 
       await processingLogRepository.append(
         jobId, 'toc',
@@ -70,7 +72,7 @@ export const processingService = {
       await processingLogRepository.updateJobProgress(jobId, 15, 'structure');
       await processingLogRepository.append(jobId, 'structure', 'Building chapter/section structure...');
 
-      if (hasToc) {
+      if (hasToc && outline) {
         await buildStructureFromOutline(jobId, bookId, pdfBuffer, outline, totalPages);
       } else {
         await buildBatchStructure(jobId, bookId, totalPages);
@@ -91,44 +93,39 @@ export const processingService = {
         const startPage = section.startPage ?? 1;
         const endPage = section.endPage ?? startPage;
 
-        let sectionText = '';
-        for (let page = startPage; page <= endPage; page++) {
+        // Mirror frontend's NibService.getCleanText():
+        // 1. Extract rich page range (with font resolution)
+        // 2. Parse entire range with NibParser.parseDocument() (handles cross-page paragraphs)
+        // 3. Get NibDocument.fullText (headers/footers/footnotes removed)
+        let sectionText: string | null = null;
+        try {
+          const rawPages = await pdfService.extractRichPageRangeFromDoc(doc, startPage, endPage);
+          const docData = parser.parseDocument(rawPages, metadataTitle, metadataAuthor);
+          const nibDoc = NibDocument.fromData(docData);
+          sectionText = nibDoc.fullText.trim() || null;
+        } catch (err: any) {
+          await processingLogRepository.append(
+            jobId, 'text_extraction',
+            `NibParser failed for section "${section.title}": ${err.message}, trying raw extraction`,
+            'warn',
+          );
+          // Fallback: raw text extraction (same as frontend fallback)
           try {
-            const rawPageData = await pdfService.extractRichPageDataFromDoc(doc, page);
-            // Convert to NibParser's expected format
-            const parserInput = {
-              pageNumber: rawPageData.pageNumber,
-              items: rawPageData.items.map(item => ({
-                str: item.text,
-                transform: item.transform,
-                width: item.width,
-                height: item.height,
-                fontName: item.fontName,
-                hasEOL: item.hasEOL,
-              })),
-              pageHeight: rawPageData.height,
-              pageWidth: rawPageData.width,
-            };
-            const nibPage = parser.parsePage(parserInput);
-            const pageText = nibPage.paragraphs
-              .map(p => p.sentences.map(s => s.words.map(w => w.text).join(' ')).join(' '))
-              .join('\n\n');
-            sectionText += (sectionText ? '\n\n' : '') + pageText;
-          } catch (err: any) {
-            await processingLogRepository.append(
-              jobId, 'text_extraction',
-              `Warning: failed to extract page ${page}: ${err.message}`,
-              'warn',
-            );
+            const pageTexts: string[] = [];
+            for (let p = startPage; p <= endPage; p++) {
+              const text = await pdfService.extractPageTextFromDoc(doc, p);
+              if (text.trim()) pageTexts.push(text);
+            }
+            sectionText = pageTexts.join('\n\n') || null;
+          } catch {
+            // Page has no extractable text
           }
         }
 
-        // Write extracted text to section
-        if (sectionText.trim()) {
-          await sectionRepository.update(section.id, { extractedText: sectionText.trim() });
+        if (sectionText) {
+          await sectionRepository.update(section.id, { extractedText: sectionText });
         }
 
-        // Update progress (20% to 80% range)
         const progress = Math.round(20 + ((i + 1) / totalSections) * 60);
         await processingLogRepository.updateJobProgress(jobId, progress, 'text_extraction');
 
