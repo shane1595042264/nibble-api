@@ -453,6 +453,7 @@ async function buildStructureFromOutline(
 
 // ─── Helper: Build batch structure when no TOC is available ─────────────────
 
+// Mirrors frontend's buildNibChapters: 10-page batch chapters, 1 section per page
 async function buildBatchStructure(
   jobId: string,
   bookId: string,
@@ -460,32 +461,36 @@ async function buildBatchStructure(
 ): Promise<void> {
   const batchSize = 10;
   const numBatches = Math.ceil(totalPages / batchSize);
+  let sectionOrder = 0;
 
   for (let i = 0; i < numBatches; i++) {
-    const startPage = i * batchSize + 1;
-    const endPage = Math.min((i + 1) * batchSize, totalPages);
+    const batchStart = i * batchSize + 1;
+    const batchEnd = Math.min((i + 1) * batchSize, totalPages);
 
     const chapter = await chapterRepository.create({
       bookId,
-      title: `Pages ${startPage}–${endPage}`,
-      startPage,
-      endPage,
+      title: `Pages ${batchStart}-${batchEnd}`,
+      startPage: batchStart,
+      endPage: batchEnd,
       sortOrder: i,
     });
 
-    await sectionRepository.create({
-      bookId,
-      chapterId: chapter.id,
-      title: `Pages ${startPage}–${endPage}`,
-      startPage,
-      endPage,
-      sectionType: 'content',
-      sortOrder: 0,
-    });
+    // One section per page (matches frontend's buildNibChapters)
+    for (let page = batchStart; page <= batchEnd; page++) {
+      await sectionRepository.create({
+        bookId,
+        chapterId: chapter.id,
+        title: `Page ${page}`,
+        startPage: page,
+        endPage: page,
+        sectionType: 'content',
+        sortOrder: ++sectionOrder,
+      });
+    }
   }
 
   await processingLogRepository.append(
     jobId, 'structure',
-    `Created ${numBatches} batch chapters (${batchSize} pages each)`,
+    `Created ${numBatches} batch chapters with ${totalPages} per-page sections`,
   );
 }
