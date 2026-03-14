@@ -4,6 +4,7 @@ import { billingRepository } from '../repositories/billing.repository.js';
 import { billingService } from '../services/billing.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
+import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
 import { nibCache } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -69,7 +70,7 @@ processingRoutes.get('/:jobId', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
 
-  const job = await billingRepository.findJobById(jobId);
+  const job = await processingLogRepository.getJob(jobId);
   if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
 
   let nibUrl: string | undefined;
@@ -83,7 +84,43 @@ processingRoutes.get('/:jobId', async (c) => {
   return c.json({
     status: job.status,
     progress: job.progress,
+    stage: job.stage,
     error: job.error,
+    bookId: job.bookId,
     nibUrl,
   });
+});
+
+// Get log entries for a processing job
+processingRoutes.get('/:jobId/logs', async (c) => {
+  const user = c.get('user');
+  const jobId = c.req.param('jobId');
+
+  const job = await processingLogRepository.getJob(jobId);
+  if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
+
+  const sinceParam = c.req.query('since');
+  const since = sinceParam ? new Date(sinceParam) : undefined;
+
+  const logs = await processingLogRepository.getByJobId(jobId, since);
+  return c.json(logs);
+});
+
+// Download full log as text/plain
+processingRoutes.get('/:jobId/logs/download', async (c) => {
+  const user = c.get('user');
+  const jobId = c.req.param('jobId');
+
+  const job = await processingLogRepository.getJob(jobId);
+  if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
+
+  const logs = await processingLogRepository.getByJobId(jobId);
+
+  const logText = logs
+    .map(log => `[${log.timestamp.toISOString()}] [${log.level.toUpperCase()}] [${log.stage}] ${log.message}`)
+    .join('\n');
+
+  c.header('Content-Type', 'text/plain; charset=utf-8');
+  c.header('Content-Disposition', `attachment; filename="processing-${jobId}.log"`);
+  return c.body(logText);
 });
