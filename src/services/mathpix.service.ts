@@ -114,9 +114,11 @@ export const mathpixService = {
         const cleaned = fullMd.split('\n')
           .map(l => {
             const fnMatch = l.match(/^\[\^\d+\]:\s*(.*)/);
-            if (fnMatch) return '    ' + fnMatch[1];
+            if (fnMatch) return '\n    ' + fnMatch[1];
             if (/^\[\^\d+\]$/.test(l.trim())) return '';
-            return l;
+            const stripped = l.replace(/\[\^\d+\]/g, '');
+            if (/^\s+\$\{\s*\}\s*\^\{?\d+\}?\$/.test(stripped)) return '\n' + stripped;
+            return stripped;
           })
           .join('\n').trim();
         return [cleaned];
@@ -165,10 +167,14 @@ export const mathpixService = {
           .map(l => {
             // Convert [^N]: content → footnote content (strip the reference marker)
             const fnMatch = l.match(/^\[\^\d+\]:\s*(.*)/);
-            if (fnMatch) return '    ' + fnMatch[1]; // indent footnote content
-            // Skip bare [^N] references (just markers, no content)
+            if (fnMatch) return '\n    ' + fnMatch[1]; // blank line + indent to force new paragraph
+            // Skip bare [^N] references and strip inline [^N] markers
             if (/^\[\^\d+\]$/.test(l.trim())) return '';
-            return l;
+            // Strip inline [^N] from text (e.g. "[^0]In other words" → "In other words")
+            const stripped = l.replace(/\[\^\d+\]/g, '');
+            // Ensure each indented ${ }^{N}$ footnote starts its own paragraph
+            if (/^\s+\$\{\s*\}\s*\^\{?\d+\}?\$/.test(stripped)) return '\n' + stripped;
+            return stripped;
           })
           .join('\n')
           .trim();
