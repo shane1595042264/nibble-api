@@ -142,6 +142,11 @@ export const syncService = {
     for (const clientChapter of payload.changes.chapters) {
       try {
         if (!isValidUuid(clientChapter.id)) continue;
+        // Skip if the book doesn't exist on the server (deleted or never uploaded)
+        if (clientChapter.bookId && isValidUuid(clientChapter.bookId as string)) {
+          const book = await bookRepository.findById(clientChapter.bookId as string);
+          if (!book) continue;
+        }
         const coerced = coerceDates(clientChapter);
         const server = await chapterRepository.findById(clientChapter.id);
         if (!server) {
@@ -165,6 +170,11 @@ export const syncService = {
     for (const clientSection of payload.changes.sections) {
       try {
         if (!isValidUuid(clientSection.id)) continue;
+        // Skip if the book doesn't exist on the server
+        if (clientSection.bookId && isValidUuid(clientSection.bookId as string)) {
+          const book = await bookRepository.findById(clientSection.bookId as string);
+          if (!book) continue;
+        }
         const coerced = coerceDates(clientSection);
         const server = await sectionRepository.findById(clientSection.id);
         if (!server) {
@@ -199,6 +209,11 @@ export const syncService = {
     for (const clientWord of payload.changes.vocabulary) {
       try {
         if (!isValidUuid(clientWord.id)) continue;
+        // Skip if the referenced book doesn't exist on the server
+        if (clientWord.bookId && isValidUuid(clientWord.bookId as string)) {
+          const book = await bookRepository.findById(clientWord.bookId as string);
+          if (!book) continue;
+        }
         const coerced = coerceDates(clientWord);
         const server = await vocabularyRepository.findById(clientWord.id);
         if (!server) {
