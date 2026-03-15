@@ -141,44 +141,47 @@ export const processingService = {
       const { mathpixService } = await import('./mathpix.service.js');
       if (mathpixService.isConfigured()) {
         await processingLogRepository.updateJobProgress(jobId, 75, 'mathpix');
-        await processingLogRepository.append(jobId, 'mathpix', 'Extracting rich content (tables, formulas) via Mathpix...');
+        await processingLogRepository.append(jobId, 'mathpix', 'Sending PDF to Mathpix for rich content (tables, formulas)...');
 
-        const sectionsForMathpix = await sectionRepository.findByBookId(bookId);
-        let mathpixCount = 0;
+        try {
+          // Send entire PDF to Mathpix — returns Markdown per page
+          const markdownPages = await mathpixService.convertPdfToMarkdown(pdfBuffer);
+          await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned ${markdownPages.length} page(s) of Markdown`);
 
-        for (let i = 0; i < sectionsForMathpix.length; i++) {
-          const section = sectionsForMathpix[i];
-          const startPage = section.startPage ?? 1;
-          const endPage = section.endPage ?? startPage;
+          // Map Markdown pages to sections by page number
+          const sectionsForMathpix = await sectionRepository.findByBookId(bookId);
+          let mathpixCount = 0;
 
-          try {
-            let richPages: string[] = [];
+          for (const section of sectionsForMathpix) {
+            const startPage = section.startPage ?? 1;
+            const endPage = section.endPage ?? startPage;
+
+            // Collect Markdown for this section's page range
+            const sectionMd: string[] = [];
             for (let page = startPage; page <= endPage; page++) {
-              const imageBuffer = await pdfService.renderPageToImageFromDoc(doc, page, 2.0);
-              const markdown = await mathpixService.convertPageToMarkdown(imageBuffer);
-              if (markdown.trim()) richPages.push(markdown);
+              const pageIdx = page - 1; // 0-indexed
+              if (pageIdx < markdownPages.length && markdownPages[pageIdx].trim()) {
+                sectionMd.push(markdownPages[pageIdx]);
+              }
             }
 
-            if (richPages.length > 0) {
-              const richContent = richPages.join('\n\n---\n\n');
-              await sectionRepository.update(section.id, { richContent } as any);
+            if (sectionMd.length > 0) {
+              const richContent = sectionMd.join('\n\n');
+              await sectionRepository.update(section.id, { richContent });
               mathpixCount++;
             }
-          } catch (err: any) {
-            await processingLogRepository.append(
-              jobId, 'mathpix',
-              `Warning: Mathpix failed for section "${section.title}": ${err.message}`,
-              'warn',
-            );
           }
 
-          if ((i + 1) % 10 === 0 || i === sectionsForMathpix.length - 1) {
-            const progress = Math.round(75 + ((i + 1) / sectionsForMathpix.length) * 5);
-            await processingLogRepository.updateJobProgress(jobId, progress, 'mathpix');
-          }
+          await processingLogRepository.append(jobId, 'mathpix', `Mapped rich content to ${mathpixCount} sections`);
+        } catch (err: any) {
+          await processingLogRepository.append(
+            jobId, 'mathpix',
+            `Mathpix failed: ${err.message}`,
+            'warn',
+          );
         }
 
-        await processingLogRepository.append(jobId, 'mathpix', `Mathpix processed ${mathpixCount} sections with rich content`);
+        await processingLogRepository.updateJobProgress(jobId, 80, 'mathpix');
       } else {
         await processingLogRepository.append(jobId, 'mathpix', 'Mathpix not configured — skipping rich content extraction');
       }

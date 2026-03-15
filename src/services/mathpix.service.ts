@@ -37,11 +37,77 @@ export const mathpixService = {
   },
 
   /**
-   * Convert a page image to rich Markdown using Mathpix.
-   * Returns Markdown with:
-   * - Tables as proper Markdown tables
-   * - LaTeX formulas as $...$ / $$...$$
-   * - Text with formatting preserved
+   * Convert a PDF to rich Markdown using Mathpix's PDF endpoint.
+   * Sends the entire PDF, gets back Markdown for all pages.
+   * Returns an array of page Markdown strings.
+   */
+  async convertPdfToMarkdown(pdfBuffer: Buffer): Promise<string[]> {
+    if (!this.isConfigured()) throw new Error('Mathpix not configured');
+
+    // Step 1: Upload PDF
+    const blob = new Blob([new Uint8Array(pdfBuffer)], { type: 'application/pdf' });
+    const formData = new FormData();
+    formData.append('file', blob, 'document.pdf');
+    formData.append('options_json', JSON.stringify({
+      conversion_formats: { md: true },
+      math_inline_delimiters: ['$', '$'],
+      math_display_delimiters: ['$$', '$$'],
+      enable_tables_fallback: true,
+    }));
+
+    const uploadRes = await fetch('https://api.mathpix.com/v3/pdf', {
+      method: 'POST',
+      headers: {
+        'app_id': config.MATHPIX_APP_ID,
+        'app_key': config.MATHPIX_APP_KEY,
+      },
+      body: formData,
+    });
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text().catch(() => '');
+      throw new Error(`Mathpix PDF upload error ${uploadRes.status}: ${errText}`);
+    }
+
+    const { pdf_id } = await uploadRes.json();
+
+    // Step 2: Poll for completion
+    let attempts = 0;
+    while (attempts < 60) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const statusRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}`, {
+        headers: {
+          'app_id': config.MATHPIX_APP_ID,
+          'app_key': config.MATHPIX_APP_KEY,
+        },
+      });
+      if (!statusRes.ok) throw new Error(`Mathpix status error ${statusRes.status}`);
+      const status = await statusRes.json();
+      if (status.status === 'completed') break;
+      if (status.status === 'error') throw new Error(`Mathpix processing error: ${status.error}`);
+      attempts++;
+    }
+
+    // Step 3: Download Markdown result
+    const mdRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.md`, {
+      headers: {
+        'app_id': config.MATHPIX_APP_ID,
+        'app_key': config.MATHPIX_APP_KEY,
+      },
+    });
+
+    if (!mdRes.ok) throw new Error(`Mathpix MD download error ${mdRes.status}`);
+    const fullMarkdown = await mdRes.text();
+
+    // Split by page breaks (Mathpix uses \n\n---\n\n or page markers)
+    // If no clear page breaks, return as single page
+    const pages = fullMarkdown.split(/\n---\n/).filter(p => p.trim());
+    return pages.length > 0 ? pages : [fullMarkdown];
+  },
+
+  /**
+   * Convert a single page image to rich Markdown using Mathpix.
+   * Fallback for when PDF endpoint isn't suitable.
    */
   async convertPageToMarkdown(imageBuffer: Buffer): Promise<string> {
     if (!this.isConfigured()) throw new Error('Mathpix not configured');
@@ -71,7 +137,6 @@ export const mathpixService = {
     }
 
     const data = await res.json();
-    // Prefer text format (Markdown-like with LaTeX), fall back to HTML
     return data.text ?? data.html ?? '';
   },
 
