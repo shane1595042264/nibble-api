@@ -88,21 +88,46 @@ export const mathpixService = {
       attempts++;
     }
 
-    // Step 3: Download per-page data via lines.json
-    const linesRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.lines.json`, {
-      headers: {
-        'app_id': config.MATHPIX_APP_ID,
-        'app_key': config.MATHPIX_APP_KEY,
-      },
-    });
+    // Step 3: Download both per-page lines AND full .md (for images)
+    const [linesRes, mdRes] = await Promise.all([
+      fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.lines.json`, {
+        headers: { 'app_id': config.MATHPIX_APP_ID, 'app_key': config.MATHPIX_APP_KEY },
+      }),
+      fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.md`, {
+        headers: { 'app_id': config.MATHPIX_APP_ID, 'app_key': config.MATHPIX_APP_KEY },
+      }),
+    ]);
 
     if (!linesRes.ok) throw new Error(`Mathpix lines download error ${linesRes.status}`);
     const data = await linesRes.json() as { pages: Array<{ page: number; lines: Array<{ text?: string }> }> };
 
-    // Build Markdown per page from lines
-    return data.pages.map(page =>
-      page.lines.map(line => line.text ?? '').join('\n')
-    );
+    // Extract image URLs from .md (lines.json doesn't include them)
+    let imageUrls: string[] = [];
+    if (mdRes.ok) {
+      const fullMd = await mdRes.text();
+      const imgMatches = fullMd.match(/!\[.*?\]\(https:\/\/cdn\.mathpix\.com\/cropped\/[^)]+\)/g);
+      imageUrls = imgMatches ?? [];
+    }
+
+    // Build Markdown per page from lines, injecting images where "Figure X.X" is referenced
+    const pages = data.pages.map(page => {
+      let pageText = page.lines.map(line => line.text ?? '').join('\n');
+
+      // For each image URL, check if this page references the corresponding figure
+      // Mathpix image URLs contain page info: pdf_id-{pageNum}.jpg
+      for (const imgMd of imageUrls) {
+        // Extract page number from URL: ...pdf_id-1.jpg means page 1
+        const pageMatch = imgMd.match(/-(\d+)\.jpg/);
+        if (pageMatch && parseInt(pageMatch[1]) === page.page) {
+          // Inject the image markdown at the end of the page text
+          pageText += '\n\n' + imgMd;
+        }
+      }
+
+      return pageText;
+    });
+
+    return pages;
   },
 
   /**
