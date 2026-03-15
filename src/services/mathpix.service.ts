@@ -112,7 +112,12 @@ export const mathpixService = {
       // If only 1 page, just return the whole .md
       if (data.pages.length === 1) {
         const cleaned = fullMd.split('\n')
-          .filter(l => !l.startsWith('[^'))
+          .map(l => {
+            const fnMatch = l.match(/^\[\^\d+\]:\s*(.*)/);
+            if (fnMatch) return '    ' + fnMatch[1];
+            if (/^\[\^\d+\]$/.test(l.trim())) return '';
+            return l;
+          })
           .join('\n').trim();
         return [cleaned];
       }
@@ -157,7 +162,14 @@ export const mathpixService = {
         const end = i + 1 < pageBreakPositions.length ? pageBreakPositions[i + 1] : mdText.length;
         const pageText = mdText.slice(start, end)
           .split('\n')
-          .filter(l => !l.startsWith('[^'))
+          .map(l => {
+            // Convert [^N]: content → footnote content (strip the reference marker)
+            const fnMatch = l.match(/^\[\^\d+\]:\s*(.*)/);
+            if (fnMatch) return '    ' + fnMatch[1]; // indent footnote content
+            // Skip bare [^N] references (just markers, no content)
+            if (/^\[\^\d+\]$/.test(l.trim())) return '';
+            return l;
+          })
           .join('\n')
           .trim();
         pages.push(pageText);
