@@ -20,6 +20,7 @@ import { billingRoutes } from './routes/billing.js';
 import { adminRoutes } from './routes/admin.js';
 import { aiRoutes } from './routes/ai.js';
 import { processingRoutes } from './routes/processing.js';
+import { userRoutes } from './routes/users.js';
 import { runCleanup } from './jobs/cleanup.js';
 import { startWorker } from './jobs/process-pdf.js';
 
@@ -57,8 +58,10 @@ app.use('/sync/*', authMiddleware, rateLimiter(30));
 app.use('/ai/*', authMiddleware, rateLimiter(60), aiAccessMiddleware);
 app.use('/processing/*', authMiddleware);
 app.use('/billing/*', authMiddleware);
+app.use('/users/*', authMiddleware);
 app.use('/admin/*', authMiddleware, adminMiddleware);
 
+app.route('/users', userRoutes);
 app.route('/books', bookRoutes);
 app.route('/chapters', chapterRoutes);
 app.route('/sections', sectionRoutes);

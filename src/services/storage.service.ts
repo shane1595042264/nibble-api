@@ -50,6 +50,22 @@ export const storageService = {
     return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: r2Key }), { expiresIn: 3600 });
   },
 
+  async uploadAvatar(userId: string, buffer: Buffer, contentType: string): Promise<string> {
+    const ext = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
+    const r2Key = `avatars/${userId}.${ext}`;
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: r2Key,
+      Body: buffer,
+      ContentType: contentType,
+    }));
+    return r2Key;
+  },
+
+  async getAvatarUrl(r2Key: string): Promise<string> {
+    return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: r2Key }), { expiresIn: 604800 }); // 7 days
+  },
+
   async deleteObject(r2Key: string): Promise<void> {
     await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: r2Key }));
   },
