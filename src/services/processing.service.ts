@@ -137,6 +137,52 @@ export const processingService = {
         }
       }
 
+      // ── Stage 5b: Mathpix rich content (optional) ───────────────────
+      const { mathpixService } = await import('./mathpix.service.js');
+      if (mathpixService.isConfigured()) {
+        await processingLogRepository.updateJobProgress(jobId, 75, 'mathpix');
+        await processingLogRepository.append(jobId, 'mathpix', 'Extracting rich content (tables, formulas) via Mathpix...');
+
+        const sectionsForMathpix = await sectionRepository.findByBookId(bookId);
+        let mathpixCount = 0;
+
+        for (let i = 0; i < sectionsForMathpix.length; i++) {
+          const section = sectionsForMathpix[i];
+          const startPage = section.startPage ?? 1;
+          const endPage = section.endPage ?? startPage;
+
+          try {
+            let richPages: string[] = [];
+            for (let page = startPage; page <= endPage; page++) {
+              const imageBuffer = await pdfService.renderPageToImageFromDoc(doc, page, 2.0);
+              const markdown = await mathpixService.convertPageToMarkdown(imageBuffer);
+              if (markdown.trim()) richPages.push(markdown);
+            }
+
+            if (richPages.length > 0) {
+              const richContent = richPages.join('\n\n---\n\n');
+              await sectionRepository.update(section.id, { richContent } as any);
+              mathpixCount++;
+            }
+          } catch (err: any) {
+            await processingLogRepository.append(
+              jobId, 'mathpix',
+              `Warning: Mathpix failed for section "${section.title}": ${err.message}`,
+              'warn',
+            );
+          }
+
+          if ((i + 1) % 10 === 0 || i === sectionsForMathpix.length - 1) {
+            const progress = Math.round(75 + ((i + 1) / sectionsForMathpix.length) * 5);
+            await processingLogRepository.updateJobProgress(jobId, progress, 'mathpix');
+          }
+        }
+
+        await processingLogRepository.append(jobId, 'mathpix', `Mathpix processed ${mathpixCount} sections with rich content`);
+      } else {
+        await processingLogRepository.append(jobId, 'mathpix', 'Mathpix not configured — skipping rich content extraction');
+      }
+
       // ── Stage 6: OCR fallback (80-90%) ────────────────────────────
       await processingLogRepository.updateJobProgress(jobId, 80, 'ocr');
       await processingLogRepository.append(jobId, 'ocr', 'Checking for sections needing OCR...');

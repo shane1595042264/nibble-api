@@ -29,6 +29,13 @@
       "when": 1773505835289,
       "tag": "0003_reflective_molten_man",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1773534656617,
+      "tag": "0004_dusty_warstar",
+      "breakpoints": true
     }
   ]
 }

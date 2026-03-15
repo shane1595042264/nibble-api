@@ -76,6 +76,7 @@ export const sectionRepository = {
       lastPageViewed: number;
       scrollProgress: number;
       extractedText: string;
+      richContent: string;
       sectionType: string;
       sortOrder: number;
     }>,

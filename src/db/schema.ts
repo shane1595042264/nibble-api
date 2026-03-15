@@ -116,6 +116,7 @@ export const sections = pgTable('sections', {
   lastPageViewed: integer('last_page_viewed'),
   scrollProgress: real('scroll_progress').default(0),
   extractedText: text('extracted_text'),
+  richContent: text('rich_content'),  // Mathpix Markdown (tables, formulas, formatted text)
   sectionType: text('section_type').notNull().default('content'),
   sortOrder: integer('sort_order').notNull().default(0),
   deletedAt: timestamp('deleted_at'),
