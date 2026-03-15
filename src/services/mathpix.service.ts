@@ -88,21 +88,21 @@ export const mathpixService = {
       attempts++;
     }
 
-    // Step 3: Download Markdown result
-    const mdRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.md`, {
+    // Step 3: Download per-page data via lines.json
+    const linesRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.lines.json`, {
       headers: {
         'app_id': config.MATHPIX_APP_ID,
         'app_key': config.MATHPIX_APP_KEY,
       },
     });
 
-    if (!mdRes.ok) throw new Error(`Mathpix MD download error ${mdRes.status}`);
-    const fullMarkdown = await mdRes.text();
+    if (!linesRes.ok) throw new Error(`Mathpix lines download error ${linesRes.status}`);
+    const data = await linesRes.json() as { pages: Array<{ page: number; lines: Array<{ text?: string }> }> };
 
-    // Split by page breaks (Mathpix uses \n\n---\n\n or page markers)
-    // If no clear page breaks, return as single page
-    const pages = fullMarkdown.split(/\n---\n/).filter(p => p.trim());
-    return pages.length > 0 ? pages : [fullMarkdown];
+    // Build Markdown per page from lines
+    return data.pages.map(page =>
+      page.lines.map(line => line.text ?? '').join('\n')
+    );
   },
 
   /**
