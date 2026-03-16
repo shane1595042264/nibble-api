@@ -63,7 +63,7 @@ export const bookService = {
     return { exactMatch: null, fuzzyMatches };
   },
 
-  async handleUpload(userId: string, fileHash: string, fileBuffer: Buffer, totalPages: number, title: string, author?: string) {
+  async handleUpload(userId: string, fileHash: string, fileBuffer: Buffer, totalPages: number, title: string, author?: string, mode: string = 'full') {
     // 1. Check if catalog entry exists for this hash
     let catalogEntry = await bookRepository.findCatalogByHash(fileHash);
 
@@ -128,7 +128,7 @@ export const bookService = {
         setTimeout(async () => {
           try {
             const { processingService } = await import('./processing.service.js');
-            await processingService.orchestratePipeline(job.id, fileHash, existing.id);
+            await processingService.orchestratePipeline(job.id, fileHash, existing.id, mode);
           } catch (err) {
             console.error('Processing pipeline failed:', err);
           }

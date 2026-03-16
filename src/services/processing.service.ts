@@ -17,7 +17,7 @@ export const processingService = {
   /**
    * 8-stage processing pipeline for a PDF book.
    */
-  async orchestratePipeline(jobId: string, fileHash: string, bookId: string): Promise<void> {
+  async orchestratePipeline(jobId: string, fileHash: string, bookId: string, mode: string = 'full'): Promise<void> {
     try {
       // ── Stage 1: Download PDF (0-5%) ──────────────────────────────
       await processingLogRepository.updateJobProgress(jobId, 0, 'download');
@@ -137,7 +137,11 @@ export const processingService = {
         }
       }
 
-      // ── Stage 5b: Mathpix rich content (optional) ───────────────────
+      // ── Stage 5b: Mathpix rich content (skip in toc-only mode) ──────
+      if (mode === 'toc-only') {
+        await processingLogRepository.append(jobId, 'mathpix', 'TOC-only mode — skipping Mathpix');
+        await processingLogRepository.updateJobProgress(jobId, 80, 'mathpix');
+      } else {
       const { mathpixService } = await import('./mathpix.service.js');
       if (mathpixService.isConfigured()) {
         await processingLogRepository.updateJobProgress(jobId, 75, 'mathpix');
@@ -185,8 +189,13 @@ export const processingService = {
       } else {
         await processingLogRepository.append(jobId, 'mathpix', 'Mathpix not configured — skipping rich content extraction');
       }
+      } // end mode !== 'toc-only'
 
-      // ── Stage 6: OCR fallback (80-90%) ────────────────────────────
+      // ── Stage 6: OCR fallback (skip in toc-only mode) ──────────────
+      if (mode === 'toc-only') {
+        await processingLogRepository.append(jobId, 'ocr', 'TOC-only mode — skipping OCR');
+        await processingLogRepository.updateJobProgress(jobId, 90, 'ocr');
+      } else {
       await processingLogRepository.updateJobProgress(jobId, 80, 'ocr');
       await processingLogRepository.append(jobId, 'ocr', 'Checking for sections needing OCR...');
 
@@ -261,6 +270,7 @@ export const processingService = {
       }
 
       await processingLogRepository.updateJobProgress(jobId, 90, 'ocr');
+      } // end mode !== 'toc-only' for OCR
 
       // ── Stage 7: Generate cover (90-95%) ──────────────────────────
       await processingLogRepository.updateJobProgress(jobId, 90, 'cover');

@@ -51,9 +51,10 @@ bookRoutes.post('/upload', async (c) => {
   const title = (formData.get('title') as string) || file.name.replace('.pdf', '');
   const author = formData.get('author') as string | undefined;
   const totalPages = parseInt((formData.get('totalPages') as string) || '0');
+  const mode = (formData.get('mode') as string) || 'full'; // 'full' | 'toc-only'
 
   const user = c.get('user');
-  const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author);
+  const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author, mode);
   return c.json({ ...result, jobId: result.jobId });
 });
 
