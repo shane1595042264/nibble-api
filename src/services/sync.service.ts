@@ -100,7 +100,7 @@ function resolveConflict(
   const serverScroll = Number(serverEntity.scrollProgress ?? 0);
   merged.scrollProgress = Math.max(clientScroll, serverScroll);
 
-  return merged;
+  return coerceDates(merged);
 }
 
 // ─── Sync service ───────────────────────────────────────────────────
@@ -192,10 +192,10 @@ export const syncService = {
             if (clientSection.deletedAt) {
               await sectionRepository.softDelete(clientSection.id);
             } else {
-              await sectionRepository.update(clientSection.id, {
+              await sectionRepository.update(clientSection.id, coerceDates({
                 ...data,
                 ...progressMerge,
-              } as any);
+              }) as any);
             }
           } else {
             // Server wins on timestamp, but still apply reading-progress merge
