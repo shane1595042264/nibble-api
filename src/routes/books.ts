@@ -151,3 +151,270 @@ bookRoutes.put('/:id/metadata', async (c) => {
   const result = await bookService.updateBookMetadata(c.req.param('id'), user.id, parsed.data);
   return c.json(result);
 });
+
+// ─── Smart Split: Structure endpoints ─────────────────────────────
+
+const structureSchema = z.object({
+  chapters: z.array(z.object({
+    title: z.string(),
+    startPage: z.number().int().positive(),
+    endPage: z.number().int().positive(),
+    sections: z.array(z.object({
+      title: z.string(),
+      startPage: z.number().int().positive(),
+      endPage: z.number().int().positive(),
+    })).optional(),
+  })),
+});
+
+const suggestStructureSchema = z.object({
+  tocPages: z.array(z.number().int().positive()).min(1),
+});
+
+// PUT /:id/structure — replace entire chapter/section structure
+bookRoutes.put('/:id/structure', async (c) => {
+  const user = c.get('user');
+  const bookId = c.req.param('id');
+  const book = await bookService.getBook(bookId, user.id);
+
+  const body = await c.req.json();
+  const parsed = structureSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+
+  const { db } = await import('../db/index.js');
+  const { chapters, sections } = await import('../db/schema.js');
+  const { eq } = await import('drizzle-orm');
+  const { chapterRepository } = await import('../repositories/chapter.repository.js');
+  const { sectionRepository } = await import('../repositories/section.repository.js');
+
+  // Save old sections for progress preservation
+  const oldSections = await sectionRepository.findByBookId(book.id);
+
+  // Delete existing structure
+  await db.delete(sections).where(eq(sections.bookId, book.id));
+  await db.delete(chapters).where(eq(chapters.bookId, book.id));
+
+  // Create new structure
+  const newChapters = [];
+  const newSections = [];
+  let sectionOrder = 0;
+
+  for (let ci = 0; ci < parsed.data.chapters.length; ci++) {
+    const ch = parsed.data.chapters[ci];
+
+    const chapter = await chapterRepository.create({
+      bookId: book.id,
+      title: ch.title,
+      startPage: ch.startPage,
+      endPage: ch.endPage,
+      sortOrder: ci,
+    });
+    newChapters.push(chapter);
+
+    const chapterSections = ch.sections && ch.sections.length > 0
+      ? ch.sections
+      : [{ title: ch.title, startPage: ch.startPage, endPage: ch.endPage }];
+
+    for (const sec of chapterSections) {
+      // Progress preservation: check if new section overlaps >50% with an old read section
+      let isRead = false;
+      const newRange = sec.endPage - sec.startPage + 1;
+      for (const oldSec of oldSections) {
+        if (!oldSec.isRead || oldSec.startPage == null || oldSec.endPage == null) continue;
+        const overlapStart = Math.max(sec.startPage, oldSec.startPage);
+        const overlapEnd = Math.min(sec.endPage, oldSec.endPage);
+        const overlap = Math.max(0, overlapEnd - overlapStart + 1);
+        if (overlap / newRange > 0.5) {
+          isRead = true;
+          break;
+        }
+      }
+
+      const section = await sectionRepository.create({
+        bookId: book.id,
+        chapterId: chapter.id,
+        title: sec.title,
+        startPage: sec.startPage,
+        endPage: sec.endPage,
+        sectionType: 'content',
+        sortOrder: ++sectionOrder,
+        isRead,
+        readAt: isRead ? new Date() : undefined,
+      });
+      newSections.push(section);
+    }
+  }
+
+  // Update book structure source
+  const { bookRepository } = await import('../repositories/book.repository.js');
+  await bookRepository.update(book.id, { structureSource: 'manual' });
+
+  return c.json({ chapters: newChapters, sections: newSections });
+});
+
+// POST /:id/suggest-structure — use Claude Vision to parse TOC pages
+bookRoutes.post('/:id/suggest-structure', async (c) => {
+  const user = c.get('user');
+  const bookId = c.req.param('id');
+  const book = await bookService.getBook(bookId, user.id);
+
+  const body = await c.req.json();
+  const parsed = suggestStructureSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+
+  const { bookRepository } = await import('../repositories/book.repository.js');
+  const catalog = await bookRepository.findCatalogById(book.catalogId);
+  if (!catalog) throw new AppError('NOT_FOUND', 'Catalog entry not found', 404);
+
+  const { db } = await import('../db/index.js');
+  const { pdfFiles } = await import('../db/schema.js');
+  const { eq } = await import('drizzle-orm');
+  const [pdfFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, catalog.fileHash)).limit(1);
+  if (!pdfFile) throw new AppError('NOT_FOUND', 'PDF file not found', 404);
+
+  const { storageService } = await import('../services/storage.service.js');
+  const pdfBuffer = await storageService.downloadPdf(pdfFile.r2Key);
+
+  const { pdfService } = await import('../services/pdf.service.js');
+  const doc = await pdfService.loadDocument(pdfBuffer);
+
+  try {
+    // Try rendering TOC pages as images; fall back to text extraction
+    let useImages = true;
+    const tocContent: Array<{ type: 'image'; data: string; mediaType: string } | { type: 'text'; text: string }> = [];
+
+    for (const pageNum of parsed.data.tocPages) {
+      try {
+        const imageBuffer = await pdfService.renderPageToImageFromDoc(doc, pageNum, 2.0);
+        tocContent.push({
+          type: 'image',
+          data: imageBuffer.toString('base64'),
+          mediaType: 'image/png',
+        });
+      } catch {
+        // node-canvas failed — fall back to text for all pages
+        useImages = false;
+        break;
+      }
+    }
+
+    // If image rendering failed, extract text instead
+    if (!useImages) {
+      tocContent.length = 0;
+      for (const pageNum of parsed.data.tocPages) {
+        const text = await pdfService.extractPageTextFromDoc(doc, pageNum);
+        tocContent.push({ type: 'text', text: `--- Page ${pageNum} ---\n${text}` });
+      }
+    }
+
+    // Build Claude prompt
+    const systemPrompt = `You are an expert at parsing book tables of contents. Extract the chapter/section structure from the provided TOC page(s).
+
+Return a JSON object with this exact format:
+{
+  "chapters": [
+    {
+      "title": "Chapter Title",
+      "startPage": 1,
+      "endPage": 15,
+      "sections": [
+        { "title": "Section Title", "startPage": 1, "endPage": 5 }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Use the page numbers shown in the TOC
+- If a chapter has no sub-sections, omit the "sections" field
+- For nested structures (Part > Chapter > Section), use ">" prefix notation for the chapter title (e.g. "Part 1 > Chapter 1")
+- Ensure endPage of one chapter/section is one less than startPage of the next
+- Return ONLY valid JSON, no markdown fences or commentary`;
+
+    const userContent: Array<any> = [];
+
+    // 2-shot examples
+    userContent.push({
+      type: 'text',
+      text: `Example 1 input: A TOC showing "Chapter 1: Intro ..... 1" and "Chapter 2: Methods ..... 15"
+Example 1 output: {"chapters":[{"title":"Chapter 1: Intro","startPage":1,"endPage":14},{"title":"Chapter 2: Methods","startPage":15,"endPage":30}]}
+
+Example 2 input: A TOC showing "Part I" with "1. Basics ... 3" and "2. Advanced ... 20" under it
+Example 2 output: {"chapters":[{"title":"Part I > 1. Basics","startPage":3,"endPage":19},{"title":"Part I > 2. Advanced","startPage":20,"endPage":40}]}
+
+Now parse the following TOC:`,
+    });
+
+    for (const item of tocContent) {
+      if (item.type === 'image') {
+        userContent.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: item.mediaType,
+            data: item.data,
+          },
+        });
+      } else {
+        userContent.push({ type: 'text', text: item.text });
+      }
+    }
+
+    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    const client = new Anthropic();
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userContent }],
+    });
+
+    const textBlock = response.content.find((b: any) => b.type === 'text');
+    if (!textBlock || textBlock.type !== 'text') {
+      throw new AppError('AI_ERROR', 'No text response from Claude', 502);
+    }
+
+    // Parse JSON from response (handle possible markdown fences)
+    let jsonStr = textBlock.text.trim();
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    }
+
+    const suggestions = JSON.parse(jsonStr) as {
+      chapters: Array<{
+        title: string;
+        startPage: number;
+        endPage: number;
+        sections?: Array<{ title: string; startPage: number; endPage: number }>;
+      }>;
+    };
+
+    // Flatten nested structure using > prefix for chapter accordion display
+    const flatChapters: Array<{ title: string; startPage: number; endPage: number }> = [];
+    for (const ch of suggestions.chapters) {
+      if (ch.sections && ch.sections.length > 0) {
+        for (const sec of ch.sections) {
+          flatChapters.push({
+            title: `${ch.title} > ${sec.title}`,
+            startPage: sec.startPage,
+            endPage: sec.endPage,
+          });
+        }
+      } else {
+        flatChapters.push({
+          title: ch.title,
+          startPage: ch.startPage,
+          endPage: ch.endPage,
+        });
+      }
+    }
+
+    return c.json({ suggestions, flatChapters });
+  } finally {
+    await doc.destroy().catch(() => {});
+  }
+});
