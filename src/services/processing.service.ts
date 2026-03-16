@@ -512,13 +512,20 @@ async function buildStructureFromOutline(
 
 // ─── Helper: Build batch structure when no TOC is available ─────────────────
 
-// Mirrors frontend's buildNibChapters: 10-page batch chapters, 1 section per page
+// Smart batch sizing based on total page count
+function getBatchSize(totalPages: number): number {
+  if (totalPages <= 20) return totalPages; // 1 chapter total
+  if (totalPages <= 100) return 10;
+  if (totalPages <= 500) return 20;
+  return 30;
+}
+
 async function buildBatchStructure(
   jobId: string,
   bookId: string,
   totalPages: number,
 ): Promise<void> {
-  const batchSize = 10;
+  const batchSize = getBatchSize(totalPages);
   const numBatches = Math.ceil(totalPages / batchSize);
   let sectionOrder = 0;
 
