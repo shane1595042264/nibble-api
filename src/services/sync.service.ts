@@ -116,6 +116,8 @@ export const syncService = {
     for (const clientBook of payload.changes.books) {
       try {
         if (!isValidUuid(clientBook.id)) continue;
+        // Skip books without a valid catalogId (required NOT NULL field)
+        if (!clientBook.catalogId || !isValidUuid(clientBook.catalogId as string)) continue;
         const coerced = coerceDates(clientBook);
         const server = await bookRepository.findById(clientBook.id);
         if (!server) {
@@ -174,6 +176,11 @@ export const syncService = {
         if (clientSection.bookId && isValidUuid(clientSection.bookId as string)) {
           const book = await bookRepository.findById(clientSection.bookId as string);
           if (!book) continue;
+        }
+        // Skip if chapterId is invalid or chapter doesn't exist
+        if (clientSection.chapterId && isValidUuid(clientSection.chapterId as string)) {
+          const chapter = await chapterRepository.findById(clientSection.chapterId as string);
+          if (!chapter) continue;
         }
         const coerced = coerceDates(clientSection);
         const server = await sectionRepository.findById(clientSection.id);
