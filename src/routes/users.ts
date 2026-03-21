@@ -96,7 +96,8 @@ userRoutes.post('/me/avatar', async (c) => {
   // Store the R2 key with prefix so GET /me can generate fresh presigned URLs
   await userRepository.update(user.id, { avatarUrl: `${R2_AVATAR_PREFIX}${r2Key}` });
 
-  // Return a fresh presigned URL for immediate use
+  // Return both the R2 key (for session storage) and a fresh presigned URL (for immediate display)
+  const r2Value = `${R2_AVATAR_PREFIX}${r2Key}`;
   const avatarUrl = await storageService.getAvatarUrl(r2Key);
-  return c.json({ avatarUrl });
+  return c.json({ avatarUrl, r2Key: r2Value });
 });
