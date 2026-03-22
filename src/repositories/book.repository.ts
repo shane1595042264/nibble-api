@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte, sql, desc } from 'drizzle-orm';
+import { eq, and, isNull, gte, sql, desc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { books, bookCatalog, chapters, sections, vocabulary } from '../db/schema.js';
 
@@ -91,6 +91,14 @@ export const bookRepository = {
     await db.delete(chapters).where(eq(chapters.bookId, id));
     await db.delete(vocabulary).where(eq(vocabulary.bookId, id));
     await db.delete(books).where(eq(books.id, id));
+  },
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return db
+      .select()
+      .from(books)
+      .where(and(inArray(books.id, ids), isNull(books.deletedAt)));
   },
 
   async findModifiedSince(userId: string, since: Date) {

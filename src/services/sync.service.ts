@@ -112,6 +112,31 @@ export const syncService = {
 
     // ── 1. Apply client changes ──────────────────────────────────
 
+    // Pre-load referenced books and chapters into Sets for O(1) existence checks
+    const referencedBookIds = new Set<string>();
+    for (const ch of payload.changes.chapters) {
+      if (ch.bookId && isValidUuid(ch.bookId as string)) referencedBookIds.add(ch.bookId as string);
+    }
+    for (const sec of payload.changes.sections) {
+      if (sec.bookId && isValidUuid(sec.bookId as string)) referencedBookIds.add(sec.bookId as string);
+    }
+    for (const word of payload.changes.vocabulary) {
+      if (word.bookId && isValidUuid(word.bookId as string)) referencedBookIds.add(word.bookId as string);
+    }
+    const existingBooks = await bookRepository.findByIds([...referencedBookIds]);
+    const existingBookIdSet = new Set(existingBooks.map((b) => b.id));
+
+    const referencedChapterIds = new Set<string>();
+    for (const sec of payload.changes.sections) {
+      if (sec.chapterId && isValidUuid(sec.chapterId as string)) referencedChapterIds.add(sec.chapterId as string);
+    }
+    const existingChapters = await chapterRepository.findByIds([...referencedChapterIds]);
+    const existingChapterIdSet = new Set(existingChapters.map((c) => c.id));
+
+    // Pre-load exercise progress into a Map for O(1) lookup by id
+    const serverProgressRecords = await exerciseRepository.findProgressByUserId(userId);
+    const serverProgressMap = new Map(serverProgressRecords.map((r) => [r.id, r]));
+
     // Books
     for (const clientBook of payload.changes.books) {
       try {
@@ -140,14 +165,23 @@ export const syncService = {
       } catch (e) { console.error('[sync] book error:', clientBook.id, e); }
     }
 
+    // After processing books, update the existence set so child entities aren't skipped
+    for (const clientBook of payload.changes.books) {
+      if (!isValidUuid(clientBook.id)) continue;
+      if (clientBook.deletedAt) {
+        existingBookIdSet.delete(clientBook.id);
+      } else {
+        existingBookIdSet.add(clientBook.id);
+      }
+    }
+
     // Chapters
     for (const clientChapter of payload.changes.chapters) {
       try {
         if (!isValidUuid(clientChapter.id)) continue;
         // Skip if the book doesn't exist on the server (deleted or never uploaded)
         if (clientChapter.bookId && isValidUuid(clientChapter.bookId as string)) {
-          const book = await bookRepository.findById(clientChapter.bookId as string);
-          if (!book) continue;
+          if (!existingBookIdSet.has(clientChapter.bookId as string)) continue;
         }
         const coerced = coerceDates(clientChapter);
         const server = await chapterRepository.findById(clientChapter.id);
@@ -168,19 +202,27 @@ export const syncService = {
       } catch (e) { console.error('[sync] chapter error:', clientChapter.id, e); }
     }
 
+    // After processing chapters, update the existence set so sections aren't skipped
+    for (const clientChapter of payload.changes.chapters) {
+      if (!isValidUuid(clientChapter.id)) continue;
+      if (clientChapter.deletedAt) {
+        existingChapterIdSet.delete(clientChapter.id);
+      } else {
+        existingChapterIdSet.add(clientChapter.id);
+      }
+    }
+
     // Sections (with reading-progress special rule)
     for (const clientSection of payload.changes.sections) {
       try {
         if (!isValidUuid(clientSection.id)) continue;
         // Skip if the book doesn't exist on the server
         if (clientSection.bookId && isValidUuid(clientSection.bookId as string)) {
-          const book = await bookRepository.findById(clientSection.bookId as string);
-          if (!book) continue;
+          if (!existingBookIdSet.has(clientSection.bookId as string)) continue;
         }
         // Skip if chapterId is invalid or chapter doesn't exist
         if (clientSection.chapterId && isValidUuid(clientSection.chapterId as string)) {
-          const chapter = await chapterRepository.findById(clientSection.chapterId as string);
-          if (!chapter) continue;
+          if (!existingChapterIdSet.has(clientSection.chapterId as string)) continue;
         }
         const coerced = coerceDates(clientSection);
         const server = await sectionRepository.findById(clientSection.id);
@@ -218,8 +260,7 @@ export const syncService = {
         if (!isValidUuid(clientWord.id)) continue;
         // Skip if the referenced book doesn't exist on the server
         if (clientWord.bookId && isValidUuid(clientWord.bookId as string)) {
-          const book = await bookRepository.findById(clientWord.bookId as string);
-          if (!book) continue;
+          if (!existingBookIdSet.has(clientWord.bookId as string)) continue;
         }
         const coerced = coerceDates(clientWord);
         const server = await vocabularyRepository.findById(clientWord.id);
@@ -256,8 +297,7 @@ export const syncService = {
 
     // Exercise progress
     for (const clientProgress of payload.changes.exerciseProgress) {
-      const serverRecords = await exerciseRepository.findProgressByUserId(userId);
-      const server = serverRecords.find((r) => r.id === clientProgress.id);
+      const server = serverProgressMap.get(clientProgress.id);
       if (!server) {
         // Use upsert to handle potential exerciseId conflicts
         if (clientProgress.exerciseId && clientProgress.bookId) {
@@ -312,15 +352,9 @@ export const syncService = {
       ]),
     ];
 
-    // Chapters & sections for all user books
-    const serverChapters: SyncEntity[] = [];
-    const serverSections: SyncEntity[] = [];
-    for (const bookId of allBookIds) {
-      const chapters = await chapterRepository.findModifiedSince(bookId, since);
-      serverChapters.push(...(chapters as unknown as SyncEntity[]));
-      const sections = await sectionRepository.findModifiedSince(bookId, since);
-      serverSections.push(...(sections as unknown as SyncEntity[]));
-    }
+    // Chapters & sections for all user books (batch query)
+    const serverChapters = await chapterRepository.findModifiedSinceForBooks(allBookIds, since) as unknown as SyncEntity[];
+    const serverSections = await sectionRepository.findModifiedSinceForBooks(allBookIds, since) as unknown as SyncEntity[];
 
     // Vocabulary
     const serverVocabulary = await vocabularyRepository.findModifiedSince(userId, since);
@@ -331,13 +365,9 @@ export const syncService = {
     // Exercise progress
     const serverExerciseProgress = await exerciseRepository.findProgressModifiedSince(userId, since);
 
-    // Exercises (server-to-client only): get all exercises for user's book catalog IDs
+    // Exercises (server-to-client only): get all exercises for user's book catalog IDs (batch query)
     const catalogIds = [...new Set(userBooks.map((b) => b.catalogId))];
-    const serverExercises: SyncEntity[] = [];
-    for (const catalogId of catalogIds) {
-      const exercises = await exerciseRepository.findByCatalogId(catalogId);
-      serverExercises.push(...(exercises as unknown as SyncEntity[]));
-    }
+    const serverExercises = await exerciseRepository.findByCatalogIds(catalogIds) as unknown as SyncEntity[];
 
     // ── 3. Return response ───────────────────────────────────────
 

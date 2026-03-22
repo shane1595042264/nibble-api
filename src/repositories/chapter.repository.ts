@@ -89,4 +89,20 @@ export const chapterRepository = {
       .from(chapters)
       .where(and(eq(chapters.bookId, bookId), gte(chapters.updatedAt, since)));
   },
+
+  async findModifiedSinceForBooks(bookIds: string[], since: Date) {
+    if (bookIds.length === 0) return [];
+    return db
+      .select()
+      .from(chapters)
+      .where(and(inArray(chapters.bookId, bookIds), gte(chapters.updatedAt, since)));
+  },
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return db
+      .select()
+      .from(chapters)
+      .where(and(inArray(chapters.id, ids), isNull(chapters.deletedAt)));
+  },
 };

@@ -137,4 +137,12 @@ export const sectionRepository = {
         and(eq(sections.bookId, bookId), gte(sections.updatedAt, since)),
       );
   },
+
+  async findModifiedSinceForBooks(bookIds: string[], since: Date) {
+    if (bookIds.length === 0) return [];
+    return db
+      .select()
+      .from(sections)
+      .where(and(inArray(sections.bookId, bookIds), gte(sections.updatedAt, since)));
+  },
 };

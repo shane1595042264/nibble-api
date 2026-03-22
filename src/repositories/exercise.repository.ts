@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte } from 'drizzle-orm';
+import { eq, and, isNull, gte, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { exercises, exerciseProgress } from '../db/schema.js';
 
@@ -140,5 +140,13 @@ export const exerciseRepository = {
           gte(exerciseProgress.updatedAt, since),
         ),
       );
+  },
+
+  async findByCatalogIds(catalogIds: string[]) {
+    if (catalogIds.length === 0) return [];
+    return db
+      .select()
+      .from(exercises)
+      .where(inArray(exercises.catalogId, catalogIds));
   },
 };
