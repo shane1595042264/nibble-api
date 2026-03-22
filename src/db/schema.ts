@@ -88,6 +88,7 @@ export const books = pgTable('books', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   uniqueIndex('idx_books_user_catalog').on(table.userId, table.catalogId),
+  index('idx_books_user_id').on(table.userId),
 ]);
 
 // ============ CHAPTERS ============
@@ -101,7 +102,9 @@ export const chapters = pgTable('chapters', {
   deletedAt: timestamp('deleted_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (table) => [
+  index('idx_chapters_book_id').on(table.bookId),
+]);
 
 // ============ SECTIONS ============
 export const sections = pgTable('sections', {
@@ -122,7 +125,10 @@ export const sections = pgTable('sections', {
   deletedAt: timestamp('deleted_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (table) => [
+  index('idx_sections_book_id').on(table.bookId),
+  index('idx_sections_chapter_id').on(table.chapterId),
+]);
 
 // ============ VOCABULARY ============
 export const vocabulary = pgTable('vocabulary', {
@@ -144,7 +150,10 @@ export const vocabulary = pgTable('vocabulary', {
   deletedAt: timestamp('deleted_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (table) => [
+  index('idx_vocabulary_user_id').on(table.userId),
+  index('idx_vocabulary_book_id').on(table.bookId),
+]);
 
 // ============ EXERCISES (shared, linked to catalog) ============
 export const exercises = pgTable('exercises', {
@@ -218,6 +227,8 @@ export const processingJobs = pgTable('processing_jobs', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   index('idx_processing_jobs_status').on(table.status, table.createdAt),
+  index('idx_processing_jobs_user_id').on(table.userId),
+  index('idx_processing_jobs_file_hash').on(table.fileHash),
 ]);
 
 // ============ PROCESSING LOGS ============

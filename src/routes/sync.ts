@@ -36,20 +36,24 @@ syncRoutes.get('/status', async (c) => {
   const { vocabularyRepository } = await import('../repositories/vocabulary.repository.js');
 
   const books = await bookRepository.findByUserId(user.id);
+  const bookIds = books.map(b => b.id);
+
+  const [chapterCounts, sectionCounts, vocabCount] = await Promise.all([
+    chapterRepository.countByBookIds(bookIds),
+    sectionRepository.countByBookIds(bookIds),
+    vocabularyRepository.countByUserId(user.id),
+  ]);
+
   let totalChapters = 0;
   let totalSections = 0;
   let lastUpdated: Date | null = null;
 
   for (const book of books) {
-    const chapters = await chapterRepository.findByBookId(book.id);
-    totalChapters += chapters.length;
-    const sections = await sectionRepository.findByBookId(book.id);
-    totalSections += sections.length;
+    totalChapters += chapterCounts.get(book.id) ?? 0;
+    totalSections += sectionCounts.get(book.id) ?? 0;
     const bookUpdated = new Date(book.updatedAt);
     if (!lastUpdated || bookUpdated > lastUpdated) lastUpdated = bookUpdated;
   }
-
-  const vocabCount = await vocabularyRepository.countByUserId(user.id);
 
   return c.json({
     books: books.map(b => ({ id: b.id, customTitle: b.customTitle, catalogId: b.catalogId, updatedAt: b.updatedAt })),

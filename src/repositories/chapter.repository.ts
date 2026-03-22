@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte, asc } from 'drizzle-orm';
+import { eq, and, isNull, gte, asc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { chapters } from '../db/schema.js';
 
@@ -68,6 +68,19 @@ export const chapterRepository = {
       .where(eq(chapters.id, id))
       .returning();
     return deleted ?? null;
+  },
+
+  async countByBookIds(bookIds: string[]): Promise<Map<string, number>> {
+    if (bookIds.length === 0) return new Map();
+    const rows = await db
+      .select({ bookId: chapters.bookId })
+      .from(chapters)
+      .where(and(inArray(chapters.bookId, bookIds), isNull(chapters.deletedAt)));
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      counts.set(row.bookId, (counts.get(row.bookId) ?? 0) + 1);
+    }
+    return counts;
   },
 
   async findModifiedSince(bookId: string, since: Date) {
