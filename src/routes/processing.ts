@@ -6,7 +6,7 @@ import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
-import { nibCache } from '../db/schema.js';
+import { nibCache, processingJobs, sections, chapters } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
 import { Errors } from '../lib/errors.js';
@@ -80,6 +80,55 @@ processingRoutes.post('/:jobId/cancel', async (c) => {
   const { processingService } = await import('../services/processing.service.js');
   await processingService.cancelJob(jobId);
   return c.json({ cancelled: true });
+});
+
+// Retry a failed processing job
+processingRoutes.post('/:jobId/retry', async (c) => {
+  const user = c.get('user');
+  const jobId = c.req.param('jobId');
+
+  const job = await processingLogRepository.getJob(jobId);
+  if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
+
+  if (job.status !== 'failed') {
+    return c.json({ error: 'Only failed jobs can be retried' }, 400);
+  }
+
+  if (!job.bookId) {
+    return c.json({ error: 'No book associated with this job' }, 400);
+  }
+
+  const book = await bookRepository.findById(job.bookId);
+  if (!book) throw Errors.notFound('Book');
+
+  // Clean up old chapters/sections from the failed attempt
+  await db.delete(sections).where(eq(sections.bookId, book.id));
+  await db.delete(chapters).where(eq(chapters.bookId, book.id));
+
+  // Create a new processing job
+  const [newJob] = await db.insert(processingJobs).values({
+    fileHash: job.fileHash,
+    userId: user.id,
+    bookId: book.id,
+    status: 'pending',
+  }).returning();
+
+  await bookRepository.update(book.id, { processingStatus: 'processing' });
+
+  // Fire-and-forget pipeline
+  setTimeout(async () => {
+    try {
+      const { processingService } = await import('../services/processing.service.js');
+      await processingService.orchestratePipeline(newJob.id, job.fileHash, book.id);
+    } catch (err: any) {
+      console.error('Retry processing pipeline failed:', err);
+      const errorMessage = err?.message ?? 'Unknown error';
+      await processingLogRepository.failJob(newJob.id, errorMessage).catch(() => {});
+      await bookRepository.update(book.id, { processingStatus: 'error' }).catch(() => {});
+    }
+  }, 0);
+
+  return c.json({ jobId: newJob.id });
 });
 
 // Check processing status

@@ -129,8 +129,11 @@ export const bookService = {
           try {
             const { processingService } = await import('./processing.service.js');
             await processingService.orchestratePipeline(job.id, fileHash, existing.id, mode);
-          } catch (err) {
+          } catch (err: any) {
             console.error('Processing pipeline failed:', err);
+            const errorMessage = err?.message ?? 'Unknown error';
+            await processingLogRepository.failJob(job.id, errorMessage).catch(() => {});
+            await bookRepository.update(existing.id, { processingStatus: 'error' }).catch(() => {});
           }
         }, 0);
       }
@@ -162,8 +165,11 @@ export const bookService = {
         try {
           const { processingService } = await import('./processing.service.js');
           await processingService.orchestratePipeline(job.id, fileHash, book.id);
-        } catch (err) {
+        } catch (err: any) {
           console.error('Processing pipeline failed:', err);
+          const errorMessage = err?.message ?? 'Unknown error';
+          await processingLogRepository.failJob(job.id, errorMessage).catch(() => {});
+          await bookRepository.update(book.id, { processingStatus: 'error' }).catch(() => {});
         }
       }, 0);
     }
