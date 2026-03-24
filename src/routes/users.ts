@@ -90,6 +90,13 @@ userRoutes.post('/me/avatar', async (c) => {
     throw new AppError('VALIDATION_ERROR', 'File must be under 2 MB', 400);
   }
 
+  // Delete old R2 avatar if one exists
+  const existing = await userRepository.findById(user.id);
+  if (existing?.avatarUrl?.startsWith(R2_AVATAR_PREFIX)) {
+    const oldKey = existing.avatarUrl.slice(R2_AVATAR_PREFIX.length);
+    await storageService.deleteObject(oldKey).catch(() => {});
+  }
+
   const buffer = Buffer.from(await file.arrayBuffer());
   const r2Key = await storageService.uploadAvatar(user.id, buffer, file.type);
 

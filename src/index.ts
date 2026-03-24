@@ -58,6 +58,7 @@ app.use('/sync/*', authMiddleware, rateLimiter(30));
 app.use('/ai/*', authMiddleware, rateLimiter(60), aiAccessMiddleware);
 app.use('/processing/*', authMiddleware);
 app.use('/billing/*', authMiddleware);
+app.use('/users/me/avatar', authMiddleware, rateLimiter(5, 3600000));
 app.use('/users/*', authMiddleware);
 app.use('/admin/*', authMiddleware, adminMiddleware);
 

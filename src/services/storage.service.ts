@@ -1,5 +1,6 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import sharp from 'sharp';
 import { config } from '../lib/config.js';
 
 const s3 = new S3Client({
@@ -50,14 +51,18 @@ export const storageService = {
     return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: r2Key }), { expiresIn: 3600 });
   },
 
-  async uploadAvatar(userId: string, buffer: Buffer, contentType: string): Promise<string> {
-    const ext = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
-    const r2Key = `avatars/${userId}.${ext}`;
+  async uploadAvatar(userId: string, buffer: Buffer, _contentType: string): Promise<string> {
+    const resized = await sharp(buffer)
+      .resize(256, 256, { fit: 'cover' })
+      .webp({ quality: 80 })
+      .toBuffer();
+
+    const r2Key = `avatars/${userId}.webp`;
     await s3.send(new PutObjectCommand({
       Bucket: BUCKET,
       Key: r2Key,
-      Body: buffer,
-      ContentType: contentType,
+      Body: resized,
+      ContentType: 'image/webp',
     }));
     return r2Key;
   },

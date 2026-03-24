@@ -39,12 +39,14 @@
     "pdfjs-dist": "^5.5.207",
     "postgres": "^3.4.8",
     "railway": "^2.0.17",
+    "sharp": "^0.34.5",
     "stripe": "^20.4.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^25.4.0",
+    "@types/sharp": "^0.31.1",
     "drizzle-kit": "^0.31.9",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
