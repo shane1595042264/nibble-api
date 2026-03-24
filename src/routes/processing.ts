@@ -101,17 +101,22 @@ processingRoutes.post('/:jobId/retry', async (c) => {
   const book = await bookRepository.findById(job.bookId);
   if (!book) throw Errors.notFound('Book');
 
-  // Clean up old chapters/sections from the failed attempt
-  await db.delete(sections).where(eq(sections.bookId, book.id));
-  await db.delete(chapters).where(eq(chapters.bookId, book.id));
+  // Wrap deletes + insert in a transaction to prevent data loss if any step fails
+  const { newJob } = await db.transaction(async (tx) => {
+    // Clean up old chapters/sections from the failed attempt
+    await tx.delete(sections).where(eq(sections.bookId, book.id));
+    await tx.delete(chapters).where(eq(chapters.bookId, book.id));
 
-  // Create a new processing job
-  const [newJob] = await db.insert(processingJobs).values({
-    fileHash: job.fileHash,
-    userId: user.id,
-    bookId: book.id,
-    status: 'pending',
-  }).returning();
+    // Create a new processing job
+    const [createdJob] = await tx.insert(processingJobs).values({
+      fileHash: job.fileHash,
+      userId: user.id,
+      bookId: book.id,
+      status: 'pending',
+    }).returning();
+
+    return { newJob: createdJob };
+  });
 
   await bookRepository.update(book.id, { processingStatus: 'processing' });
 
