@@ -145,38 +145,91 @@ export const processingService = {
       const { mathpixService } = await import('./mathpix.service.js');
       if (mathpixService.isConfigured()) {
         await processingLogRepository.updateJobProgress(jobId, 75, 'mathpix');
-        await processingLogRepository.append(jobId, 'mathpix', 'Sending PDF to Mathpix for rich content (tables, formulas)...');
 
         try {
-          // Send entire PDF to Mathpix — returns Markdown per page
-          const markdownPages = await mathpixService.convertPdfToMarkdown(pdfBuffer);
-          await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned ${markdownPages.length} page(s) of Markdown`);
-
-          // Map Markdown pages to sections by page number
+          // Cherry-pick: only send pages that likely contain tables or formulas
           const sectionsForMathpix = await sectionRepository.findByBookId(bookId);
-          let mathpixCount = 0;
 
+          // Patterns that indicate rich content needing Mathpix
+          const richContentPattern = /\$.*\$|\\frac|\\sum|\\int|\\sqrt|\\begin\{|\\end\{|\|[-+|]+\||[│┃┆┊]|^\s*[-|]+\s*$/m;
+          const tableHeaderPattern = /(\t.*){2,}|(\s{2,}\S+){3,}/m;
+
+          // Collect unique page numbers that need Mathpix processing
+          const pagesNeedingMathpix = new Set<number>();
           for (const section of sectionsForMathpix) {
-            const startPage = section.startPage ?? 1;
-            const endPage = section.endPage ?? startPage;
-
-            // Collect Markdown for this section's page range
-            const sectionMd: string[] = [];
-            for (let page = startPage; page <= endPage; page++) {
-              const pageIdx = page - 1; // 0-indexed
-              if (pageIdx < markdownPages.length && markdownPages[pageIdx].trim()) {
-                sectionMd.push(markdownPages[pageIdx]);
+            const text = section.extractedText ?? '';
+            if (richContentPattern.test(text) || tableHeaderPattern.test(text)) {
+              const startPage = section.startPage ?? 1;
+              const endPage = section.endPage ?? startPage;
+              for (let p = startPage; p <= endPage; p++) {
+                pagesNeedingMathpix.add(p);
               }
-            }
-
-            if (sectionMd.length > 0) {
-              const richContent = sectionMd.join('\n\n');
-              await sectionRepository.update(section.id, { richContent });
-              mathpixCount++;
             }
           }
 
-          await processingLogRepository.append(jobId, 'mathpix', `Mapped rich content to ${mathpixCount} sections`);
+          const sortedPages = Array.from(pagesNeedingMathpix).sort((a, b) => a - b);
+          await processingLogRepository.append(
+            jobId, 'mathpix',
+            `Cherry-picked ${sortedPages.length} of ${totalPages} pages for Mathpix (tables/formulas detected)`,
+          );
+
+          if (sortedPages.length === 0) {
+            await processingLogRepository.append(jobId, 'mathpix', 'No pages with tables/formulas detected — skipping Mathpix');
+          } else {
+            // Process cherry-picked pages via per-page image API (5 concurrent)
+            const pageMarkdown = new Map<number, string>(); // page number → markdown
+            const CONCURRENCY = 5;
+
+            for (let i = 0; i < sortedPages.length; i += CONCURRENCY) {
+              const batch = sortedPages.slice(i, i + CONCURRENCY);
+              const results = await Promise.all(
+                batch.map(async (pageNum) => {
+                  try {
+                    const imageBuffer = await pdfService.renderPageToImageFromDoc(doc, pageNum, 2.0);
+                    const md = await mathpixService.convertPageToMarkdown(imageBuffer);
+                    return { pageNum, md };
+                  } catch (err: any) {
+                    await processingLogRepository.append(
+                      jobId, 'mathpix',
+                      `Warning: Mathpix failed for page ${pageNum}: ${err.message}`,
+                      'warn',
+                    );
+                    return { pageNum, md: '' };
+                  }
+                }),
+              );
+              for (const { pageNum, md } of results) {
+                if (md.trim()) pageMarkdown.set(pageNum, md);
+              }
+
+              // Progress: 75-80% range
+              const progress = Math.round(75 + ((i + batch.length) / sortedPages.length) * 5);
+              await processingLogRepository.updateJobProgress(jobId, progress, 'mathpix');
+            }
+
+            await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned content for ${pageMarkdown.size} pages`);
+
+            // Map per-page markdown to sections
+            let mathpixCount = 0;
+            for (const section of sectionsForMathpix) {
+              const startPage = section.startPage ?? 1;
+              const endPage = section.endPage ?? startPage;
+
+              const sectionMd: string[] = [];
+              for (let page = startPage; page <= endPage; page++) {
+                const md = pageMarkdown.get(page);
+                if (md) sectionMd.push(md);
+              }
+
+              if (sectionMd.length > 0) {
+                const richContent = sectionMd.join('\n\n');
+                await sectionRepository.update(section.id, { richContent });
+                mathpixCount++;
+              }
+            }
+
+            await processingLogRepository.append(jobId, 'mathpix', `Mapped rich content to ${mathpixCount} sections`);
+          }
         } catch (err: any) {
           await processingLogRepository.append(
             jobId, 'mathpix',

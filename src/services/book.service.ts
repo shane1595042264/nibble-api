@@ -164,7 +164,7 @@ export const bookService = {
       setTimeout(async () => {
         try {
           const { processingService } = await import('./processing.service.js');
-          await processingService.orchestratePipeline(job.id, fileHash, book.id);
+          await processingService.orchestratePipeline(job.id, fileHash, book.id, mode);
         } catch (err: any) {
           console.error('Processing pipeline failed:', err);
           const errorMessage = err?.message ?? 'Unknown error';
