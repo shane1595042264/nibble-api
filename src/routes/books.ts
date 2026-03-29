@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { bookService } from '../services/book.service.js';
 import { AppError } from '../lib/errors.js';
+import { config } from '../lib/config.js';
 
 export const bookRoutes = new Hono();
 
@@ -43,6 +44,18 @@ bookRoutes.post('/upload', async (c) => {
   const formData = await c.req.formData();
   const file = formData.get('file') as File;
   if (!file) return c.json({ error: 'No file provided' }, 400);
+
+  // Validate file type (PDF only)
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (!isPdf) {
+    return c.json({ error: 'Only PDF files are allowed' }, 400);
+  }
+
+  // Validate file size before loading into memory
+  const maxBytes = config.MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+  if (file.size > maxBytes) {
+    return c.json({ error: `File size exceeds the ${config.MAX_UPLOAD_SIZE_MB}MB limit` }, 413);
+  }
 
   const buffer = Buffer.from(await file.arrayBuffer());
   const { sha256 } = await import('../lib/hash.js');
