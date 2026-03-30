@@ -45,9 +45,8 @@ bookRoutes.post('/upload', async (c) => {
   const file = formData.get('file') as File;
   if (!file) return c.json({ error: 'No file provided' }, 400);
 
-  // Validate file type (PDF only)
-  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-  if (!isPdf) {
+  // Validate file type (PDF only) — check MIME type first
+  if (file.type !== 'application/pdf') {
     return c.json({ error: 'Only PDF files are allowed' }, 400);
   }
 
@@ -58,6 +57,11 @@ bookRoutes.post('/upload', async (c) => {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
+
+  // Validate PDF magic bytes (%PDF header)
+  if (buffer.length < 4 || buffer[0] !== 0x25 || buffer[1] !== 0x50 || buffer[2] !== 0x44 || buffer[3] !== 0x46) {
+    return c.json({ error: 'Only PDF files are allowed' }, 400);
+  }
   const { sha256 } = await import('../lib/hash.js');
   const fileHash = sha256(buffer);
 
