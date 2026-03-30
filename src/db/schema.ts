@@ -171,7 +171,9 @@ export const exercises = pgTable('exercises', {
   sortOrder: integer('sort_order').notNull().default(0),
   metadata: jsonb('metadata').notNull().default({}),
   createdAt: timestamp('created_at').notNull().defaultNow(),
-});
+}, (table) => [
+  index('idx_exercises_catalog_id').on(table.catalogId),
+]);
 
 // ============ EXERCISE PROGRESS (per-user) ============
 export const exerciseProgress = pgTable('exercise_progress', {
@@ -189,6 +191,7 @@ export const exerciseProgress = pgTable('exercise_progress', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   uniqueIndex('idx_exercise_progress_unique').on(table.userId, table.exerciseId),
+  index('idx_exercise_progress_user_id').on(table.userId),
 ]);
 
 // ============ NIB CACHE (shared) ============
