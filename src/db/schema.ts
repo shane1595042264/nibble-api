@@ -89,6 +89,8 @@ export const books = pgTable('books', {
 }, (table) => [
   uniqueIndex('idx_books_user_catalog').on(table.userId, table.catalogId),
   index('idx_books_user_id').on(table.userId),
+  index('idx_books_processing_status').on(table.processingStatus),
+  index('idx_books_deleted_at').on(table.deletedAt),
 ]);
 
 // ============ CHAPTERS ============
@@ -104,6 +106,7 @@ export const chapters = pgTable('chapters', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   index('idx_chapters_book_id').on(table.bookId),
+  index('idx_chapters_deleted_at').on(table.deletedAt),
 ]);
 
 // ============ SECTIONS ============
@@ -128,6 +131,7 @@ export const sections = pgTable('sections', {
 }, (table) => [
   index('idx_sections_book_id').on(table.bookId),
   index('idx_sections_chapter_id').on(table.chapterId),
+  index('idx_sections_deleted_at').on(table.deletedAt),
 ]);
 
 // ============ VOCABULARY ============
@@ -153,6 +157,7 @@ export const vocabulary = pgTable('vocabulary', {
 }, (table) => [
   index('idx_vocabulary_user_id').on(table.userId),
   index('idx_vocabulary_book_id').on(table.bookId),
+  index('idx_vocabulary_word').on(table.word),
 ]);
 
 // ============ EXERCISES (shared, linked to catalog) ============
