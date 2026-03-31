@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../lib/config.js';
 
 const anthropic = config.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: config.ANTHROPIC_API_KEY })
+  ? new Anthropic({ apiKey: config.ANTHROPIC_API_KEY, timeout: 30_000 })
   : null;
 
 export interface PageAnalysis {
