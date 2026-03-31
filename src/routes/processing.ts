@@ -192,6 +192,7 @@ processingRoutes.get('/:jobId/logs/download', async (c) => {
     .join('\n');
 
   c.header('Content-Type', 'text/plain; charset=utf-8');
-  c.header('Content-Disposition', `attachment; filename="processing-${jobId}.log"`);
+  const safeJobId = jobId.replace(/[^a-zA-Z0-9_-]/g, '');
+  c.header('Content-Disposition', `attachment; filename="processing-${safeJobId}.log"`);
   return c.body(logText);
 });

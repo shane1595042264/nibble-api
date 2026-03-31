@@ -6,6 +6,17 @@ import { config } from '../lib/config.js';
 
 export const bookRoutes = new Hono();
 
+// ─── Helpers ──────────────────────────────────────────────────────
+
+/** Strip characters unsafe for Content-Disposition filenames and limit length */
+function sanitizeFilename(name: string, maxLength = 100): string {
+  return name
+    .replace(/["\\\r\n\x00-\x1f]/g, '') // remove quotes, backslashes, control chars
+    .replace(/[/:*?<>|]/g, '_')          // replace filesystem-unsafe chars
+    .slice(0, maxLength)
+    .trim() || 'download';
+}
+
 // ─── Zod schemas ───────────────────────────────────────────────────
 
 const createBookSchema = z.object({
@@ -65,10 +76,23 @@ bookRoutes.post('/upload', async (c) => {
   const { sha256 } = await import('../lib/hash.js');
   const fileHash = sha256(buffer);
 
-  const title = (formData.get('title') as string) || file.name.replace('.pdf', '');
-  const author = formData.get('author') as string | undefined;
-  const totalPages = parseInt((formData.get('totalPages') as string) || '0');
-  const mode = (formData.get('mode') as string) || 'full'; // 'full' | 'toc-only'
+  const rawTitle = (formData.get('title') as string) || file.name.replace('.pdf', '');
+  const rawAuthor = formData.get('author') as string | undefined;
+  const rawTotalPages = (formData.get('totalPages') as string) || '0';
+  const rawMode = (formData.get('mode') as string) || 'full';
+
+  const uploadFields = z.object({
+    title: z.string().max(255),
+    author: z.string().max(255).optional(),
+    totalPages: z.coerce.number().int().min(0).max(10000),
+    mode: z.enum(['full', 'toc-only']),
+  }).safeParse({ title: rawTitle, author: rawAuthor || undefined, totalPages: rawTotalPages, mode: rawMode });
+
+  if (!uploadFields.success) {
+    return c.json({ error: `Validation error: ${uploadFields.error.issues.map(i => i.message).join(', ')}` }, 400);
+  }
+
+  const { title, author, totalPages, mode } = uploadFields.data;
 
   const user = c.get('user');
   const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author, mode);
@@ -128,7 +152,7 @@ bookRoutes.get('/:id/download', async (c) => {
   const buffer = await storageService.downloadPdf(pdfFile.r2Key);
 
   c.header('Content-Type', 'application/pdf');
-  c.header('Content-Disposition', `attachment; filename="${catalog.title || 'book'}.pdf"`);
+  c.header('Content-Disposition', `attachment; filename="${sanitizeFilename(catalog.title || 'book')}.pdf"`);
   return c.body(new Uint8Array(buffer));
 });
 
