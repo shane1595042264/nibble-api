@@ -108,7 +108,6 @@ function resolveConflict(
 export const syncService = {
   async sync(userId: string, payload: SyncPayload): Promise<SyncResponse> {
     const since = new Date(payload.lastSyncedAt);
-    const now = new Date();
 
     // ── 1. Apply client changes ──────────────────────────────────
 
@@ -381,7 +380,7 @@ export const syncService = {
         exerciseProgress: serverExerciseProgress as unknown as SyncEntity[],
         exercises: serverExercises,
       },
-      syncedAt: now.toISOString(),
+      syncedAt: new Date().toISOString(),
     };
   },
 };
