@@ -6,19 +6,19 @@ import { AppError } from '../lib/errors.js';
 export const aiRoutes = new Hono();
 
 const wordContextSchema = z.object({
-  word: z.string().min(1),
-  sentence: z.string().min(1),
-  bookContext: z.string().optional(),
+  word: z.string().min(1).max(100),
+  sentence: z.string().min(1).max(2000),
+  bookContext: z.string().max(5000).optional(),
 });
 
 const translateSchema = z.object({
-  text: z.string().min(1),
-  targetLanguage: z.string().min(1),
+  text: z.string().min(1).max(5000),
+  targetLanguage: z.string().min(1).max(50),
 });
 
 const explainSchema = z.object({
-  text: z.string().min(1),
-  bookContext: z.string().optional(),
+  text: z.string().min(1).max(5000),
+  bookContext: z.string().max(5000).optional(),
 });
 
 // OCR — extract text from page images using Claude Vision
