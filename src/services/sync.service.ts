@@ -123,7 +123,9 @@ export const syncService = {
       if (word.bookId && isValidUuid(word.bookId as string)) referencedBookIds.add(word.bookId as string);
     }
     const existingBooks = await bookRepository.findByIds([...referencedBookIds]);
-    const existingBookIdSet = new Set(existingBooks.map((b) => b.id));
+    // Security: only allow references to books owned by the authenticated user
+    const ownedBooks = existingBooks.filter((b) => b.userId === userId);
+    const existingBookIdSet = new Set(ownedBooks.map((b) => b.id));
 
     const referencedChapterIds = new Set<string>();
     for (const sec of payload.changes.sections) {
@@ -150,6 +152,8 @@ export const syncService = {
             userId,
           } as any);
         } else {
+          // Security: skip books not owned by the authenticated user
+          if (server.userId !== userId) continue;
           const clientTime = new Date(clientBook.updatedAt).getTime();
           const serverTime = new Date(server.updatedAt).getTime();
           if (clientTime > serverTime) {
