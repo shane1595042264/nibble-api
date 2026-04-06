@@ -22,7 +22,7 @@ async function processNextJob() {
     await jobQueue.markProcessing(job.id);
 
     try {
-      await processingService.orchestratePipeline(job.id, job.fileHash, job.userId);
+      await processingService.orchestratePipeline(job.id, job.fileHash, job.bookId!);
       console.log(`Job ${job.id} completed`);
     } catch (error: any) {
       console.error(`Job ${job.id} failed:`, error.message);
