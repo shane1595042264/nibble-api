@@ -195,17 +195,34 @@ bookRoutes.put('/:id/metadata', async (c) => {
 
 // ─── Smart Split: Structure endpoints ─────────────────────────────
 
-const structureSchema = z.object({
-  chapters: z.array(z.object({
+const chapterItemSchema = z.object({
+  title: z.string(),
+  startPage: z.number().int().positive(),
+  endPage: z.number().int().positive(),
+  sections: z.array(z.object({
     title: z.string(),
     startPage: z.number().int().positive(),
     endPage: z.number().int().positive(),
-    sections: z.array(z.object({
-      title: z.string(),
-      startPage: z.number().int().positive(),
-      endPage: z.number().int().positive(),
-    })).optional(),
-  })),
+  }).refine(s => s.startPage <= s.endPage, {
+    message: 'Section startPage must be <= endPage',
+  })).optional(),
+}).refine(ch => ch.startPage <= ch.endPage, {
+  message: 'Chapter startPage must be <= endPage',
+});
+
+const structureSchema = z.object({
+  chapters: z.array(chapterItemSchema).refine((chapters) => {
+    for (let i = 0; i < chapters.length; i++) {
+      for (let j = i + 1; j < chapters.length; j++) {
+        const a = chapters[i];
+        const b = chapters[j];
+        if (a.startPage <= b.endPage && b.startPage <= a.endPage) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }, { message: 'Chapter page ranges must not overlap' }),
 });
 
 const suggestStructureSchema = z.object({
@@ -222,6 +239,28 @@ bookRoutes.put('/:id/structure', async (c) => {
   const parsed = structureSchema.safeParse(body);
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+
+  // Validate page numbers are within the book's total page count
+  const { bookRepository } = await import('../repositories/book.repository.js');
+  const catalog = await bookRepository.findCatalogById(book.catalogId);
+  const totalPages = catalog?.totalPages;
+  if (totalPages && totalPages > 0) {
+    for (const ch of parsed.data.chapters) {
+      if (ch.endPage > totalPages) {
+        throw new AppError('VALIDATION_ERROR', `Chapter "${ch.title}" endPage (${ch.endPage}) exceeds total pages (${totalPages})`, 400);
+      }
+      if (ch.startPage > totalPages) {
+        throw new AppError('VALIDATION_ERROR', `Chapter "${ch.title}" startPage (${ch.startPage}) exceeds total pages (${totalPages})`, 400);
+      }
+      if (ch.sections) {
+        for (const sec of ch.sections) {
+          if (sec.endPage > totalPages) {
+            throw new AppError('VALIDATION_ERROR', `Section "${sec.title}" endPage (${sec.endPage}) exceeds total pages (${totalPages})`, 400);
+          }
+        }
+      }
+    }
   }
 
   const { db } = await import('../db/index.js');
@@ -289,7 +328,6 @@ bookRoutes.put('/:id/structure', async (c) => {
   }
 
   // Update book structure source
-  const { bookRepository } = await import('../repositories/book.repository.js');
   await bookRepository.update(book.id, { structureSource: 'manual' });
 
   return c.json({ chapters: newChapters, sections: newSections });
