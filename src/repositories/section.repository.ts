@@ -129,6 +129,14 @@ export const sectionRepository = {
     return counts;
   },
 
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return db
+      .select()
+      .from(sections)
+      .where(and(inArray(sections.id, ids), isNull(sections.deletedAt)));
+  },
+
   async findModifiedSince(bookId: string, since: Date) {
     return db
       .select()

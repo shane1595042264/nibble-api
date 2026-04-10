@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte, count } from 'drizzle-orm';
+import { eq, and, isNull, gte, count, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { vocabulary } from '../db/schema.js';
 
@@ -92,6 +92,14 @@ export const vocabularyRepository = {
       .from(vocabulary)
       .where(and(eq(vocabulary.userId, userId), isNull(vocabulary.deletedAt)));
     return result?.value ?? 0;
+  },
+
+  async findByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return db
+      .select()
+      .from(vocabulary)
+      .where(and(inArray(vocabulary.id, ids), isNull(vocabulary.deletedAt)));
   },
 
   async findModifiedSince(userId: string, since: Date) {

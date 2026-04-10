@@ -138,6 +138,24 @@ export const syncService = {
     const serverProgressRecords = await exerciseRepository.findProgressByUserId(userId);
     const serverProgressMap = new Map(serverProgressRecords.map((r) => [r.id, r]));
 
+    // Pre-load all client entity IDs into batch queries for O(1) lookups (fixes N+1)
+    const clientBookIds = payload.changes.books.map((b) => b.id).filter(isValidUuid);
+    const clientChapterIds = payload.changes.chapters.map((c) => c.id).filter(isValidUuid);
+    const clientSectionIds = payload.changes.sections.map((s) => s.id).filter(isValidUuid);
+    const clientVocabIds = payload.changes.vocabulary.map((v) => v.id).filter(isValidUuid);
+
+    const [serverBooksArr, serverChaptersArr, serverSectionsArr, serverVocabArr] = await Promise.all([
+      bookRepository.findByIds(clientBookIds),
+      chapterRepository.findByIds(clientChapterIds),
+      sectionRepository.findByIds(clientSectionIds),
+      vocabularyRepository.findByIds(clientVocabIds),
+    ]);
+
+    const serverBookMap = new Map(serverBooksArr.map((b) => [b.id, b]));
+    const serverChapterMap = new Map(serverChaptersArr.map((c) => [c.id, c]));
+    const serverSectionMap = new Map(serverSectionsArr.map((s) => [s.id, s]));
+    const serverVocabMap = new Map(serverVocabArr.map((v) => [v.id, v]));
+
     // Books
     for (const clientBook of payload.changes.books) {
       try {
@@ -145,7 +163,7 @@ export const syncService = {
         // Skip books without a valid catalogId (required NOT NULL field)
         if (!clientBook.catalogId || !isValidUuid(clientBook.catalogId as string)) continue;
         const coerced = coerceDates(clientBook);
-        const server = await bookRepository.findById(clientBook.id);
+        const server = serverBookMap.get(clientBook.id) ?? null;
         if (!server) {
           await bookRepository.create({
             ...coerced,
@@ -187,7 +205,7 @@ export const syncService = {
           if (!existingBookIdSet.has(clientChapter.bookId as string)) continue;
         }
         const coerced = coerceDates(clientChapter);
-        const server = await chapterRepository.findById(clientChapter.id);
+        const server = serverChapterMap.get(clientChapter.id) ?? null;
         if (!server) {
           await chapterRepository.create(coerced as any);
         } else {
@@ -228,7 +246,7 @@ export const syncService = {
           if (!existingChapterIdSet.has(clientSection.chapterId as string)) continue;
         }
         const coerced = coerceDates(clientSection);
-        const server = await sectionRepository.findById(clientSection.id);
+        const server = serverSectionMap.get(clientSection.id) ?? null;
         if (!server) {
           await sectionRepository.create(coerced as any);
         } else {
@@ -266,7 +284,7 @@ export const syncService = {
           if (!existingBookIdSet.has(clientWord.bookId as string)) continue;
         }
         const coerced = coerceDates(clientWord);
-        const server = await vocabularyRepository.findById(clientWord.id);
+        const server = serverVocabMap.get(clientWord.id) ?? null;
         if (!server) {
           await vocabularyRepository.create({
             ...coerced,
