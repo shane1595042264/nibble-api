@@ -362,10 +362,22 @@ export const syncService = {
     // ── 2. Gather server changes for the client ──────────────────
 
     // Books modified since lastSyncedAt (includes soft-deleted)
-    const serverBooks = await bookRepository.findModifiedSince(userId, since);
+    const serverBooksRaw = await bookRepository.findModifiedSince(userId, since);
 
     // Get book IDs to query child entities
     const userBooks = await bookRepository.findByUserId(userId);
+
+    // Enrich books with totalPages from book_catalog
+    const allCatalogIds = [...new Set([
+      ...serverBooksRaw.map((b) => b.catalogId),
+      ...userBooks.map((b) => b.catalogId),
+    ])];
+    const catalogs = await bookRepository.findCatalogByIds(allCatalogIds);
+    const catalogMap = new Map(catalogs.map((c) => [c.id, c]));
+    const serverBooks = serverBooksRaw.map((b) => ({
+      ...b,
+      totalPages: catalogMap.get(b.catalogId)?.totalPages ?? 0,
+    }));
     const allBookIds = [
       ...new Set([
         ...userBooks.map((b) => b.id),

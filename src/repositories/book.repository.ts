@@ -110,6 +110,14 @@ export const bookRepository = {
 
   // ─── Book catalog ─────────────────────────────────────────────
 
+  async findCatalogByIds(ids: string[]) {
+    if (ids.length === 0) return [];
+    return db
+      .select()
+      .from(bookCatalog)
+      .where(inArray(bookCatalog.id, ids));
+  },
+
   async findCatalogById(id: string) {
     const [catalog] = await db
       .select()
