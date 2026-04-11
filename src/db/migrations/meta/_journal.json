@@ -57,6 +57,13 @@
       "when": 1774890156281,
       "tag": "0007_add-missing-indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775883724755,
+      "tag": "0008_add-composite-indexes",
+      "breakpoints": true
     }
   ]
 }

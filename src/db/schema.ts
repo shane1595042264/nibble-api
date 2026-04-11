@@ -106,6 +106,7 @@ export const chapters = pgTable('chapters', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   index('idx_chapters_book_id').on(table.bookId),
+  index('idx_chapters_book_sort').on(table.bookId, table.sortOrder),
   index('idx_chapters_deleted_at').on(table.deletedAt),
 ]);
 
@@ -131,6 +132,7 @@ export const sections = pgTable('sections', {
 }, (table) => [
   index('idx_sections_book_id').on(table.bookId),
   index('idx_sections_chapter_id').on(table.chapterId),
+  index('idx_sections_chapter_sort').on(table.chapterId, table.sortOrder),
   index('idx_sections_deleted_at').on(table.deletedAt),
 ]);
 
@@ -156,6 +158,7 @@ export const vocabulary = pgTable('vocabulary', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
   index('idx_vocabulary_user_id').on(table.userId),
+  index('idx_vocabulary_user_word').on(table.userId, table.word),
   index('idx_vocabulary_book_id').on(table.bookId),
   index('idx_vocabulary_word').on(table.word),
 ]);
