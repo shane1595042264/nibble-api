@@ -2,7 +2,24 @@ import { bookRepository } from '../repositories/book.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
 import { processingJobs } from '../db/schema.js';
+import { eq, or, and } from 'drizzle-orm';
 import { Errors } from '../lib/errors.js';
+
+/** Start the processing pipeline in a fire-and-forget manner. */
+function startPipelineAsync(jobId: string, fileHash: string, bookId: string, mode: string) {
+  setTimeout(async () => {
+    try {
+      const { processingService } = await import('./processing.service.js');
+      await processingService.orchestratePipeline(jobId, fileHash, bookId, mode);
+    } catch (err: any) {
+      console.error('Processing pipeline failed:', err);
+      const errorMessage = err?.message ?? 'Unknown error';
+      // Use the repository to properly update job and book status on failure
+      await processingLogRepository.failJob(jobId, errorMessage).catch(() => {});
+      await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
+    }
+  }, 0);
+}
 
 export const bookService = {
   async listBooks(userId: string) {
@@ -99,7 +116,6 @@ export const bookService = {
     const r2Key = await storageService.uploadPdf(fileHash, fileBuffer);
 
     // 5. Create pdf_files record
-    const { db } = await import('../db/index.js');
     const { pdfFiles } = await import('../db/schema.js');
     await db.insert(pdfFiles).values({
       fileHash,
@@ -107,36 +123,52 @@ export const bookService = {
       sizeBytes: fileBuffer.length,
     }).onConflictDoNothing();
 
-    // 6. Create book in user's library
+    // 6. Create book and processing job atomically to prevent race conditions.
+    // The partial unique index on processing_jobs(file_hash) WHERE status IN ('pending','processing')
+    // ensures only one active job can exist per file hash at the database level.
     const existing = await bookRepository.findByUserIdAndCatalogId(userId, catalogEntry.id);
+
     if (existing) {
-      // Check if we should start processing for existing book
-      let jobId: string | undefined;
-      const activeJob = await processingLogRepository.findActiveJobByFileHash(fileHash);
-      if (activeJob) {
-        jobId = activeJob.id;
-      } else if (existing.processingStatus !== 'complete') {
-        const [job] = await db.insert(processingJobs).values({
+      const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
+        // Check for active job inside the transaction
+        const [activeJob] = await tx
+          .select()
+          .from(processingJobs)
+          .where(
+            and(
+              eq(processingJobs.fileHash, fileHash),
+              or(
+                eq(processingJobs.status, 'pending'),
+                eq(processingJobs.status, 'processing'),
+              ),
+            ),
+          )
+          .limit(1);
+
+        if (activeJob) {
+          return { jobId: activeJob.id, shouldStartPipeline: false };
+        }
+
+        if (existing.processingStatus === 'complete') {
+          return { jobId: undefined, shouldStartPipeline: false };
+        }
+
+        // Insert new job — partial unique index prevents duplicates
+        const [job] = await tx.insert(processingJobs).values({
           fileHash,
           userId,
           bookId: existing.id,
           status: 'pending',
         }).returning();
-        jobId = job.id;
+
         await bookRepository.update(existing.id, { processingStatus: 'processing' });
-        // Fire-and-forget pipeline
-        setTimeout(async () => {
-          try {
-            const { processingService } = await import('./processing.service.js');
-            await processingService.orchestratePipeline(job.id, fileHash, existing.id, mode);
-          } catch (err: any) {
-            console.error('Processing pipeline failed:', err);
-            const errorMessage = err?.message ?? 'Unknown error';
-            await processingLogRepository.failJob(job.id, errorMessage).catch(() => {});
-            await bookRepository.update(existing.id, { processingStatus: 'error' }).catch(() => {});
-          }
-        }, 0);
+        return { jobId: job.id, shouldStartPipeline: true };
+      });
+
+      if (shouldStartPipeline && jobId) {
+        startPipelineAsync(jobId, fileHash, existing.id, mode);
       }
+
       return { book: existing, catalogEntry, jobId, isNew: false };
     }
 
@@ -146,32 +178,39 @@ export const bookService = {
       processingStatus: 'pending',
     });
 
-    // Auto-start processing for new books
-    let jobId: string | undefined;
-    const activeJob = await processingLogRepository.findActiveJobByFileHash(fileHash);
-    if (activeJob) {
-      jobId = activeJob.id;
-    } else {
-      const [job] = await db.insert(processingJobs).values({
+    // Atomically create processing job for the new book
+    const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
+      const [activeJob] = await tx
+        .select()
+        .from(processingJobs)
+        .where(
+          and(
+            eq(processingJobs.fileHash, fileHash),
+            or(
+              eq(processingJobs.status, 'pending'),
+              eq(processingJobs.status, 'processing'),
+            ),
+          ),
+        )
+        .limit(1);
+
+      if (activeJob) {
+        return { jobId: activeJob.id, shouldStartPipeline: false };
+      }
+
+      const [job] = await tx.insert(processingJobs).values({
         fileHash,
         userId,
         bookId: book.id,
         status: 'pending',
       }).returning();
-      jobId = job.id;
+
       await bookRepository.update(book.id, { processingStatus: 'processing' });
-      // Fire-and-forget pipeline
-      setTimeout(async () => {
-        try {
-          const { processingService } = await import('./processing.service.js');
-          await processingService.orchestratePipeline(job.id, fileHash, book.id, mode);
-        } catch (err: any) {
-          console.error('Processing pipeline failed:', err);
-          const errorMessage = err?.message ?? 'Unknown error';
-          await processingLogRepository.failJob(job.id, errorMessage).catch(() => {});
-          await bookRepository.update(book.id, { processingStatus: 'error' }).catch(() => {});
-        }
-      }, 0);
+      return { jobId: job.id, shouldStartPipeline: true };
+    });
+
+    if (shouldStartPipeline && jobId) {
+      startPipelineAsync(jobId, fileHash, book.id, mode);
     }
 
     return { book, catalogEntry, jobId, isNew: true };
