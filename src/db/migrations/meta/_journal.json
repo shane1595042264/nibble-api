@@ -71,6 +71,13 @@
       "when": 1776188400000,
       "tag": "0009_unique-active-processing-job",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1776034955320,
+      "tag": "0010_add-webhook-events",
+      "breakpoints": true
     }
   ]
 }

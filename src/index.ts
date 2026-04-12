@@ -44,7 +44,14 @@ app.post('/billing/webhook', async (c) => {
   const signature = c.req.header('stripe-signature');
   if (!signature) return c.json({ error: 'Missing signature' }, 400);
   const body = await c.req.text();
-  await billingService.handleWebhook(body, signature);
+  try {
+    await billingService.handleWebhook(body, signature);
+  } catch (err) {
+    console.error('[Stripe Webhook] Failed to process event:', {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+  }
   return c.json({ received: true });
 });
 

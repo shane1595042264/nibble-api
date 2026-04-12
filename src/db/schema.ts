@@ -254,6 +254,16 @@ export const processingLogs = pgTable('processing_logs', {
   index('idx_processing_logs_job_id').on(table.jobId),
 ]);
 
+// ============ WEBHOOK EVENTS (idempotency) ============
+export const webhookEvents = pgTable('webhook_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  stripeEventId: text('stripe_event_id').notNull().unique(),
+  eventType: text('event_type').notNull(),
+  status: text('status').notNull().default('processing'),
+  error: text('error'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
 // ============ PROCESSING CHARGES (billing ledger) ============
 export const processingCharges = pgTable('processing_charges', {
   id: uuid('id').primaryKey().defaultRandom(),
