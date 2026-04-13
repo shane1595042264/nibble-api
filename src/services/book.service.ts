@@ -45,7 +45,7 @@ export const bookService = {
 
   async deleteBook(id: string, userId: string) {
     const book = await this.getBook(id, userId);
-    await bookRepository.hardDelete(book.id);
+    await bookRepository.softDelete(book.id);
     return { deleted: true };
   },
 
