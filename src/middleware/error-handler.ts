@@ -1,4 +1,5 @@
 import type { ErrorHandler } from 'hono';
+import { ZodError } from 'zod';
 import { AppError } from '../lib/errors.js';
 
 export const errorHandler: ErrorHandler = (err, c) => {
@@ -6,6 +7,12 @@ export const errorHandler: ErrorHandler = (err, c) => {
     return c.json(
       { error: { code: err.code, message: err.message, status: err.status } },
       err.status as any
+    );
+  }
+  if (err instanceof ZodError) {
+    return c.json(
+      { error: { code: 'VALIDATION_ERROR', message: err.issues.map((e) => `${String(e.path.join('.'))}: ${e.message}`).join('; '), status: 400 } },
+      400
     );
   }
   console.error('Unhandled error:', err);
