@@ -10,6 +10,29 @@ import { Errors } from '../lib/errors.js';
 
 export const adminRoutes = new Hono();
 
+const uuidParamSchema = z.string().uuid('Invalid UUID format');
+
+const catalogPaginationSchema = z.object({
+  page: z.coerce.number().int().min(1).max(10000).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().optional(),
+});
+
+const updateCatalogSchema = z.object({
+  title: z.string().optional(),
+  author: z.string().optional(),
+  description: z.string().optional(),
+  coverUrl: z.string().optional(),
+  isbn: z.string().optional(),
+  language: z.string().optional(),
+  publisher: z.string().optional(),
+  publishYear: z.number().int().optional(),
+  categories: z.array(z.string()).optional(),
+  totalPages: z.number().int().min(0).optional(),
+  userCount: z.number().int().min(0).optional(),
+  metadataSource: z.string().optional(),
+}).strict();
+
 // List all users
 adminRoutes.get('/users', async (c) => {
   const allUsers = await db.select({
@@ -37,9 +60,11 @@ adminRoutes.put('/users/:id/role', async (c) => {
 
 // List catalog entries (paginated)
 adminRoutes.get('/catalog', async (c) => {
-  const page = parseInt(c.req.query('page') ?? '1');
-  const limit = parseInt(c.req.query('limit') ?? '20');
-  const search = c.req.query('search');
+  const { page, limit, search } = catalogPaginationSchema.parse({
+    page: c.req.query('page'),
+    limit: c.req.query('limit'),
+    search: c.req.query('search'),
+  });
 
   // Use bookRepository catalog methods
   if (search) {
@@ -57,29 +82,35 @@ adminRoutes.get('/catalog', async (c) => {
 
 // Get catalog entry detail
 adminRoutes.get('/catalog/:id', async (c) => {
-  const entry = await bookRepository.findCatalogById(c.req.param('id'));
-  if (!entry) return c.json({ error: 'Not found' }, 404);
+  const id = uuidParamSchema.parse(c.req.param('id'));
+  const entry = await bookRepository.findCatalogById(id);
+  if (!entry) throw Errors.notFound('Catalog entry');
   return c.json(entry);
 });
 
 // Update catalog entry
 adminRoutes.put('/catalog/:id', async (c) => {
+  const id = uuidParamSchema.parse(c.req.param('id'));
   const body = await c.req.json();
-  const updated = await bookRepository.updateCatalog(c.req.param('id'), body);
+  const data = updateCatalogSchema.parse(body);
+  const updated = await bookRepository.updateCatalog(id, data);
+  if (!updated) throw Errors.notFound('Catalog entry');
   return c.json(updated);
 });
 
 // Delete catalog entry
 adminRoutes.delete('/catalog/:id', async (c) => {
+  const id = uuidParamSchema.parse(c.req.param('id'));
   const { bookCatalog } = await import('../db/schema.js');
-  await db.delete(bookCatalog).where(eq(bookCatalog.id, c.req.param('id')));
+  const [deleted] = await db.delete(bookCatalog).where(eq(bookCatalog.id, id)).returning({ id: bookCatalog.id });
+  if (!deleted) throw Errors.notFound('Catalog entry');
   return c.json({ deleted: true });
 });
 
 // Add a catalog book to admin's own bookshelf (marketplace → library)
 adminRoutes.post('/catalog/:id/add-to-shelf', async (c) => {
   const user = c.get('user');
-  const catalogId = c.req.param('id');
+  const catalogId = uuidParamSchema.parse(c.req.param('id'));
   const catalog = await bookRepository.findCatalogById(catalogId);
   if (!catalog) throw Errors.notFound('Catalog entry');
 

@@ -26,4 +26,6 @@ export const Errors = {
     new AppError('AI_ERROR', msg, 502),
   rateLimited: () =>
     new AppError('RATE_LIMITED', 'Too many requests', 429),
+  badRequest: (msg: string) =>
+    new AppError('BAD_REQUEST', msg, 400),
 };
