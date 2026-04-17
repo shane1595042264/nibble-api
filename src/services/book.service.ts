@@ -1,7 +1,7 @@
 import { bookRepository } from '../repositories/book.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
-import { processingJobs } from '../db/schema.js';
+import { processingJobs, pdfFiles, sections as sectionsTable, chapters as chaptersTable } from '../db/schema.js';
 import { eq, or, and } from 'drizzle-orm';
 import { Errors } from '../lib/errors.js';
 
@@ -111,21 +111,22 @@ export const bookService = {
       });
     }
 
-    // 4. Upload PDF to R2
-    const { storageService } = await import('./storage.service.js');
-    const r2Key = await storageService.uploadPdf(fileHash, fileBuffer);
+    // 4. Upload PDF to R2 (skip if already stored)
+    const [existingPdf] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
 
-    // 5. Create pdf_files record
-    const { pdfFiles } = await import('../db/schema.js');
-    await db.insert(pdfFiles).values({
-      fileHash,
-      r2Key,
-      sizeBytes: fileBuffer.length,
-    }).onConflictDoNothing();
+    if (!existingPdf) {
+      const { storageService } = await import('./storage.service.js');
+      const r2Key = await storageService.uploadPdf(fileHash, fileBuffer);
+      await db.insert(pdfFiles).values({
+        fileHash,
+        r2Key,
+        sizeBytes: fileBuffer.length,
+      }).onConflictDoNothing();
+    }
 
-    // 6. Create book and processing job atomically to prevent race conditions.
-    // The partial unique index on processing_jobs(file_hash) WHERE status IN ('pending','processing')
-    // ensures only one active job can exist per file hash at the database level.
+    // 5. Find existing book (active or soft-deleted) for this user+catalog.
+    // The unique index on (userId, catalogId) covers ALL rows including soft-deleted,
+    // so we must handle deleted books to avoid a constraint violation on re-upload.
     const existing = await bookRepository.findByUserIdAndCatalogId(userId, catalogEntry.id);
 
     if (existing) {
@@ -172,6 +173,54 @@ export const bookService = {
       return { book: existing, catalogEntry, jobId, isNew: false };
     }
 
+    // Check for soft-deleted book with the same user+catalog (re-upload after delete)
+    const deleted = await bookRepository.findDeletedByUserIdAndCatalogId(userId, catalogEntry.id);
+
+    if (deleted) {
+      // Restore the soft-deleted book: clear deletedAt, clean up old structure, re-process
+      await db.delete(sectionsTable).where(eq(sectionsTable.bookId, deleted.id));
+      await db.delete(chaptersTable).where(eq(chaptersTable.bookId, deleted.id));
+
+      const restoredBook = await bookRepository.restore(deleted.id, { processingStatus: 'pending' });
+
+      const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
+        const [activeJob] = await tx
+          .select()
+          .from(processingJobs)
+          .where(
+            and(
+              eq(processingJobs.fileHash, fileHash),
+              or(
+                eq(processingJobs.status, 'pending'),
+                eq(processingJobs.status, 'processing'),
+              ),
+            ),
+          )
+          .limit(1);
+
+        if (activeJob) {
+          return { jobId: activeJob.id, shouldStartPipeline: false };
+        }
+
+        const [job] = await tx.insert(processingJobs).values({
+          fileHash,
+          userId,
+          bookId: deleted.id,
+          status: 'pending',
+        }).returning();
+
+        await bookRepository.update(deleted.id, { processingStatus: 'processing' });
+        return { jobId: job.id, shouldStartPipeline: true };
+      });
+
+      if (shouldStartPipeline && jobId) {
+        startPipelineAsync(jobId, fileHash, deleted.id, mode);
+      }
+
+      return { book: restoredBook!, catalogEntry, jobId, isNew: false };
+    }
+
+    // Truly new book — create fresh
     const book = await bookRepository.create({
       userId,
       catalogId: catalogEntry.id,

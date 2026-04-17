@@ -36,6 +36,32 @@ export const bookRepository = {
     return book ?? null;
   },
 
+  /** Find soft-deleted book for the same user+catalog (for re-upload after delete) */
+  async findDeletedByUserIdAndCatalogId(userId: string, catalogId: string) {
+    const [book] = await db
+      .select()
+      .from(books)
+      .where(
+        and(
+          eq(books.userId, userId),
+          eq(books.catalogId, catalogId),
+          sql`${books.deletedAt} IS NOT NULL`,
+        ),
+      )
+      .limit(1);
+    return book ?? null;
+  },
+
+  /** Restore a soft-deleted book by clearing deletedAt and resetting processing state */
+  async restore(id: string, data?: Partial<{ processingStatus: string; structureSource: string }>) {
+    const [restored] = await db
+      .update(books)
+      .set({ deletedAt: null, ...data })
+      .where(eq(books.id, id))
+      .returning();
+    return restored ?? null;
+  },
+
   async create(data: {
     userId: string;
     catalogId: string;
