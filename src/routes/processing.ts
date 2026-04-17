@@ -61,7 +61,7 @@ processingRoutes.post('/start', async (c) => {
     processingCostCents: (catalog.totalPages ?? 0) * 5,
   });
   await bookRepository.update(book.id, { processingStatus: 'pending' });
-  const payment = await billingService.createPaymentIntent(user.id, job.id, catalog.totalPages ?? 0);
+  const payment = await billingService.createPaymentIntent(user.id, job.id);
   return c.json({ jobId: job.id, ...payment });
 });
 

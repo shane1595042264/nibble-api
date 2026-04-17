@@ -6,15 +6,14 @@ export const billingRoutes = new Hono();
 
 const createPaymentSchema = z.object({
   jobId: z.string(),
-  totalPages: z.number().int().positive(),
 });
 
 // Create payment intent
 billingRoutes.post('/create-payment', async (c) => {
   const user = c.get('user');
   const body = await c.req.json();
-  const { jobId, totalPages } = createPaymentSchema.parse(body);
-  const result = await billingService.createPaymentIntent(user.id, jobId, totalPages);
+  const { jobId } = createPaymentSchema.parse(body);
+  const result = await billingService.createPaymentIntent(user.id, jobId);
   return c.json(result);
 });
 

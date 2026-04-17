@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 import { eq } from 'drizzle-orm';
 import { config } from '../lib/config.js';
 import { billingRepository } from '../repositories/billing.repository.js';
+import { bookRepository } from '../repositories/book.repository.js';
 import { userRepository } from '../repositories/user.repository.js';
 import { Errors } from '../lib/errors.js';
 import { db } from '../db/index.js';
@@ -12,8 +13,19 @@ const stripe = config.STRIPE_SECRET_KEY
   : null;
 
 export const billingService = {
-  async createPaymentIntent(userId: string, jobId: string, totalPages: number) {
+  async createPaymentIntent(userId: string, jobId: string) {
     if (!stripe) throw Errors.processingFailed('Stripe not configured');
+
+    // Look up totalPages server-side from the processing job's fileHash → book catalog
+    const job = await billingRepository.findJobById(jobId);
+    if (!job) throw Errors.notFound('Processing job');
+    if (job.userId !== userId) throw Errors.forbidden('Job does not belong to user');
+
+    const catalog = await bookRepository.findCatalogByHash(job.fileHash);
+    if (!catalog) throw Errors.notFound('Book catalog entry');
+
+    const totalPages = catalog.totalPages ?? 0;
+    if (totalPages <= 0) throw Errors.processingFailed('Book has no page count');
 
     const amountCents = totalPages * config.PROCESSING_PRICE_PER_PAGE_CENTS;
 
