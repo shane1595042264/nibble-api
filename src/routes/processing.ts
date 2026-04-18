@@ -174,7 +174,7 @@ processingRoutes.get('/:jobId/logs', async (c) => {
   const since = sinceParam ? new Date(sinceParam) : undefined;
 
   const logs = await processingLogRepository.getByJobId(jobId, since);
-  return c.json(logs);
+  return c.json({ logs });
 });
 
 // Download full log as text/plain
