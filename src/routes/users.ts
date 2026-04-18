@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import bcrypt from 'bcryptjs';
 import { userRepository } from '../repositories/user.repository.js';
 import { storageService } from '../services/storage.service.js';
 import { AppError } from '../lib/errors.js';
@@ -9,6 +10,8 @@ export const userRoutes = new Hono();
 const MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2 MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const R2_AVATAR_PREFIX = 'r2:';
+const PASSWORD_BCRYPT_ROUNDS = 12;
+const MIN_PASSWORD_LENGTH = 6;
 
 /** If avatarUrl is an R2 key, resolve it to a fresh presigned URL. */
 async function resolveAvatarUrl(avatarUrl: string | null): Promise<string | null> {
@@ -20,13 +23,21 @@ async function resolveAvatarUrl(avatarUrl: string | null): Promise<string | null
   return avatarUrl;
 }
 
-function userJson(user: { id: string; email: string; name: string | null; avatarUrl: string | null; authRole: string }) {
+function userJson(user: {
+  id: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+  authRole: string;
+  passwordHash?: string | null;
+}) {
   return {
     id: user.id,
     email: user.email,
     name: user.name,
     avatarUrl: user.avatarUrl,
     authRole: user.authRole,
+    hasPassword: !!user.passwordHash,
   };
 }
 
@@ -70,6 +81,38 @@ userRoutes.put('/me', async (c) => {
 
   const resolved = await resolveAvatarUrl(updated.avatarUrl);
   return c.json(userJson({ ...updated, avatarUrl: resolved }));
+});
+
+// ─── POST /me/password ───────────────────────────────────────────
+// Set a password for the first time (OAuth-only user) or change an existing one.
+// currentPassword is required iff the user already has a password.
+const passwordSchema = z.object({
+  currentPassword: z.string().optional(),
+  newPassword: z.string().min(MIN_PASSWORD_LENGTH),
+});
+
+userRoutes.post('/me/password', async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json();
+  const parsed = passwordSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new AppError('VALIDATION_ERROR', `Password must be at least ${MIN_PASSWORD_LENGTH} characters`, 400);
+  }
+
+  const full = await userRepository.findById(user.id);
+  if (!full) throw new AppError('NOT_FOUND', 'User not found', 404);
+
+  if (full.passwordHash) {
+    if (!parsed.data.currentPassword) {
+      throw new AppError('VALIDATION_ERROR', 'Current password is required', 400);
+    }
+    const ok = await bcrypt.compare(parsed.data.currentPassword, full.passwordHash);
+    if (!ok) throw new AppError('VALIDATION_ERROR', 'Current password is incorrect', 400);
+  }
+
+  const passwordHash = await bcrypt.hash(parsed.data.newPassword, PASSWORD_BCRYPT_ROUNDS);
+  await userRepository.update(user.id, { passwordHash });
+  return c.json({ success: true });
 });
 
 // ─── POST /me/avatar ─────────────────────────────────────────────
