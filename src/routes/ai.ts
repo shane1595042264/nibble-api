@@ -67,3 +67,61 @@ aiRoutes.post('/explain', async (c) => {
   const explanation = await aiService.explain(text, bookContext);
   return c.json({ explanation });
 });
+
+// ─── Reader-side translation (replaces client-side Anthropic calls) ──
+
+const translateWordSchema = z.object({
+  word: z.string().min(1).max(200),
+  sentence: z.string().min(1).max(2000),
+  targetLanguage: z.string().min(1).max(50),
+});
+
+aiRoutes.post('/translate-word', async (c) => {
+  const body = await c.req.json();
+  const parsed = translateWordSchema.safeParse(body);
+  if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
+  const result = await aiService.translateWord(parsed.data.word, parsed.data.sentence, parsed.data.targetLanguage);
+  return c.json(result);
+});
+
+const translateSentenceSchema = z.object({
+  sentence: z.string().min(1).max(2000),
+  paragraphContext: z.string().max(5000).optional().default(''),
+  targetLanguage: z.string().min(1).max(50),
+});
+
+aiRoutes.post('/translate-sentence', async (c) => {
+  const body = await c.req.json();
+  const parsed = translateSentenceSchema.safeParse(body);
+  if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
+  const result = await aiService.translateSentence(parsed.data.sentence, parsed.data.paragraphContext, parsed.data.targetLanguage);
+  return c.json(result);
+});
+
+const explainTranslationSchema = z.object({
+  word: z.string().min(1).max(200),
+  sentence: z.string().min(1).max(2000),
+  translation: z.string().min(1).max(500),
+  targetLanguage: z.string().min(1).max(50),
+});
+
+aiRoutes.post('/explain-translation', async (c) => {
+  const body = await c.req.json();
+  const parsed = explainTranslationSchema.safeParse(body);
+  if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
+  const result = await aiService.explainTranslation(parsed.data.word, parsed.data.sentence, parsed.data.translation, parsed.data.targetLanguage);
+  return c.json(result);
+});
+
+const explainContentSchema = z.object({
+  content: z.string().min(1).max(10000),
+  surroundingContext: z.string().max(10000).optional().default(''),
+});
+
+aiRoutes.post('/explain-content', async (c) => {
+  const body = await c.req.json();
+  const parsed = explainContentSchema.safeParse(body);
+  if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
+  const result = await aiService.explainContent(parsed.data.content, parsed.data.surroundingContext);
+  return c.json(result);
+});

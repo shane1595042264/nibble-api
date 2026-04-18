@@ -257,4 +257,108 @@ Respond with a JSON array of PageAnalysis objects.`;
 
     return response.content[0].type === 'text' ? response.content[0].text : '';
   },
+
+  // ─── Reader-side translation / explanation endpoints ─────────────
+  // These match the prompts that used to live in the frontend's
+  // translation-service.ts, so the client no longer needs its own
+  // Anthropic key for word lookups.
+
+  async translateWord(
+    word: string,
+    sentence: string,
+    targetLanguage: string,
+  ): Promise<{ pronunciation: string; translation: string; partOfSpeech: string }> {
+    if (!anthropic) throw new Error('Anthropic not configured');
+    const prompt = `You are a precise dictionary/translator. Given an English word and the sentence it appears in, provide:
+1. The romanized pronunciation of the ENGLISH word (IPA format, e.g. /deɪ/ for "day")
+2. A single, contextually accurate ${targetLanguage} translation — just ONE word or very short phrase, not multiple definitions
+3. The part of speech (n., v., adj., adv., prep., conj., etc.)
+
+Word: "${word}"
+Sentence: "${sentence}"
+
+Respond in this exact JSON format only, no other text:
+{"pronunciation": "/.../ ", "translation": "...", "partOfSpeech": "..."}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 150,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = response.content[0].type === 'text' ? response.content[0].text : '';
+    try {
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('no json');
+      const parsed = JSON.parse(match[0]);
+      return {
+        pronunciation: parsed.pronunciation ?? '',
+        translation: parsed.translation ?? '',
+        partOfSpeech: parsed.partOfSpeech ?? '',
+      };
+    } catch {
+      return { pronunciation: '', translation: text.slice(0, 50), partOfSpeech: '' };
+    }
+  },
+
+  async translateSentence(
+    sentence: string,
+    paragraphContext: string,
+    targetLanguage: string,
+  ): Promise<{ translation: string }> {
+    if (!anthropic) throw new Error('Anthropic not configured');
+    const prompt = `Translate the following English sentence into ${targetLanguage}. Use the surrounding paragraph for context to ensure accuracy. Return ONLY the translated sentence, nothing else.
+
+Sentence: "${sentence}"
+
+Paragraph context: "${paragraphContext}"`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 300,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = response.content[0].type === 'text' ? response.content[0].text : '';
+    return { translation: text.trim().replace(/^["']|["']$/g, '') };
+  },
+
+  async explainTranslation(
+    word: string,
+    sentence: string,
+    translation: string,
+    targetLanguage: string,
+  ): Promise<{ explanation: string }> {
+    if (!anthropic) throw new Error('Anthropic not configured');
+    const prompt = `Explain briefly (under 100 words) why the English word "${word}" is translated as "${translation}" in ${targetLanguage}, given the sentence: "${sentence}". Focus on how the sentence context determines this specific meaning. Be concise and direct.`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return { explanation: response.content[0].type === 'text' ? response.content[0].text : '' };
+  },
+
+  async explainContent(
+    content: string,
+    surroundingContext: string,
+  ): Promise<{ explanation: string }> {
+    if (!anthropic) throw new Error('Anthropic not configured');
+    const prompt = `Explain the following content clearly and concisely. What does it mean, what is it showing, and how does it relate to the surrounding context?
+
+Content:
+${content}
+
+Surrounding context:
+${surroundingContext}
+
+Give a clear explanation in English. If it's a table, explain what the data represents. If it's code, explain the algorithm. If it's a formula, explain what each variable means. Be thorough but concise.`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return { explanation: response.content[0].type === 'text' ? response.content[0].text : '' };
+  },
 };
