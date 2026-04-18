@@ -26,6 +26,23 @@ export const storageService = {
     return r2Key;
   },
 
+  /**
+   * Upload a source book file (PDF or EPUB). PDFs land in pdfs/ for backwards
+   * compat with existing storage; EPUBs land in epubs/. Extension in the key
+   * reflects the format so downloaders can pick the right parser.
+   */
+  async uploadBookFile(fileHash: string, buffer: Buffer, format: 'pdf' | 'epub'): Promise<string> {
+    if (format === 'pdf') return this.uploadPdf(fileHash, buffer);
+    const r2Key = `epubs/${fileHash}.epub`;
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: r2Key,
+      Body: buffer,
+      ContentType: 'application/epub+zip',
+    }));
+    return r2Key;
+  },
+
   async uploadNib(fileHash: string, nibJson: string): Promise<string> {
     const r2Key = `nibs/${fileHash}.nib.json`;
     await s3.send(new PutObjectCommand({

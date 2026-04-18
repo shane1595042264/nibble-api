@@ -182,6 +182,7 @@ export const bookRepository = {
     categories?: string[];
     fileHash: string;
     totalPages?: number;
+    format?: 'pdf' | 'epub';
     metadataSource?: string;
   }) {
     const [created] = await db.insert(bookCatalog).values(data).returning();

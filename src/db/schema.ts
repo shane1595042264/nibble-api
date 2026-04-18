@@ -64,6 +64,8 @@ export const bookCatalog = pgTable('book_catalog', {
   categories: text('categories').array(),
   fileHash: text('file_hash').notNull().unique(),
   totalPages: integer('total_pages'),
+  /** Source format of the uploaded file. 'pdf' | 'epub'. Existing rows default to 'pdf'. */
+  format: text('format').notNull().default('pdf'),
   userCount: integer('user_count').notNull().default(1),
   metadataSource: text('metadata_source').notNull().default('manual'),
   createdAt: timestamp('created_at').notNull().defaultNow(),

@@ -1,0 +1,1 @@
+ALTER TABLE "book_catalog" ADD COLUMN "format" text DEFAULT 'pdf' NOT NULL;

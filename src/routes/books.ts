@@ -50,16 +50,11 @@ bookRoutes.post('/match', async (c) => {
   return c.json(result);
 });
 
-// POST /upload — upload PDF
+// POST /upload — upload a PDF or EPUB
 bookRoutes.post('/upload', async (c) => {
   const formData = await c.req.formData();
   const file = formData.get('file') as File;
   if (!file) return c.json({ error: 'No file provided' }, 400);
-
-  // Validate file type (PDF only) — check MIME type first
-  if (file.type !== 'application/pdf') {
-    return c.json({ error: 'Only PDF files are allowed' }, 400);
-  }
 
   // Validate file size before loading into memory
   const maxBytes = config.MAX_UPLOAD_SIZE_MB * 1024 * 1024;
@@ -69,14 +64,24 @@ bookRoutes.post('/upload', async (c) => {
 
   const buffer = Buffer.from(await file.arrayBuffer());
 
-  // Validate PDF magic bytes (%PDF header)
-  if (buffer.length < 4 || buffer[0] !== 0x25 || buffer[1] !== 0x50 || buffer[2] !== 0x44 || buffer[3] !== 0x46) {
-    return c.json({ error: 'Only PDF files are allowed' }, 400);
+  // Detect format from magic bytes so the client can't lie with a misleading MIME.
+  // PDF: %PDF (0x25 0x50 0x44 0x46). EPUB: ZIP PK\x03\x04 (0x50 0x4B 0x03 0x04).
+  const isPdf = buffer.length >= 4 && buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46;
+  const isZip = buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04;
+  // Extra EPUB sanity: .epub extension OR declared epub MIME (ZIP alone isn't proof)
+  const claimsEpub = file.type === 'application/epub+zip' || /\.epub$/i.test(file.name);
+  const isEpub = isZip && claimsEpub;
+
+  if (!isPdf && !isEpub) {
+    return c.json({ error: 'Only PDF and EPUB files are allowed' }, 400);
   }
+  const format: 'pdf' | 'epub' = isPdf ? 'pdf' : 'epub';
+
   const { sha256 } = await import('../lib/hash.js');
   const fileHash = sha256(buffer);
 
-  const rawTitle = (formData.get('title') as string) || file.name.replace('.pdf', '');
+  const defaultTitle = file.name.replace(/\.(pdf|epub)$/i, '');
+  const rawTitle = (formData.get('title') as string) || defaultTitle;
   const rawAuthor = formData.get('author') as string | undefined;
   const rawTotalPages = (formData.get('totalPages') as string) || '0';
   const rawMode = (formData.get('mode') as string) || 'full';
@@ -95,7 +100,7 @@ bookRoutes.post('/upload', async (c) => {
   const { title, author, totalPages, mode } = uploadFields.data;
 
   const user = c.get('user');
-  const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author, mode);
+  const result = await bookService.handleUpload(user.id, fileHash, buffer, totalPages, title, author, mode, format);
   return c.json({ ...result, jobId: result.jobId });
 });
 

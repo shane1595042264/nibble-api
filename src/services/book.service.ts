@@ -80,7 +80,16 @@ export const bookService = {
     return { exactMatch: null, fuzzyMatches };
   },
 
-  async handleUpload(userId: string, fileHash: string, fileBuffer: Buffer, totalPages: number, title: string, author?: string, mode: string = 'full') {
+  async handleUpload(
+    userId: string,
+    fileHash: string,
+    fileBuffer: Buffer,
+    totalPages: number,
+    title: string,
+    author?: string,
+    mode: string = 'full',
+    format: 'pdf' | 'epub' = 'pdf',
+  ) {
     // 1. Check if catalog entry exists for this hash
     let catalogEntry = await bookRepository.findCatalogByHash(fileHash);
 
@@ -90,7 +99,7 @@ export const bookService = {
         userCount: catalogEntry.userCount + 1,
       });
     } else {
-      // 2. Look up metadata from Google Books
+      // 2. Look up metadata from Google Books (PDF-friendly metadata source)
       const { metadataService } = await import('./metadata.service.js');
       const metadata = await metadataService.lookupGoogleBooks(title, author);
 
@@ -107,16 +116,19 @@ export const bookService = {
         language: metadata?.language ?? 'en',
         fileHash,
         totalPages,
+        format,
         metadataSource: metadata ? 'google_books' : 'manual',
       });
     }
 
-    // 4. Upload PDF to R2 (skip if already stored)
-    const [existingPdf] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
+    // 4. Upload the source file to R2 (skip if already stored). The pdf_files
+    // table stores both PDFs and EPUBs (naming is historical) — the r2Key
+    // carries the actual extension.
+    const [existingFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
 
-    if (!existingPdf) {
+    if (!existingFile) {
       const { storageService } = await import('./storage.service.js');
-      const r2Key = await storageService.uploadPdf(fileHash, fileBuffer);
+      const r2Key = await storageService.uploadBookFile(fileHash, fileBuffer, format);
       await db.insert(pdfFiles).values({
         fileHash,
         r2Key,

@@ -1,6 +1,7 @@
 import { storageService } from './storage.service.js';
 import { pdfService } from './pdf.service.js';
 import type { OutlineItem } from './pdf.service.js';
+import { parseEpub } from './epub.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { chapterRepository } from '../repositories/chapter.repository.js';
@@ -15,9 +16,39 @@ const parser = new NibParser();
 
 export const processingService = {
   /**
-   * 8-stage processing pipeline for a PDF book.
+   * Dispatch the right per-format pipeline based on the book's catalog format.
+   * PDFs run the full 8-stage pipeline; EPUBs run a much simpler pipeline
+   * (unzip + parse OPF/XHTML + extract plain text + insert sections).
    */
   async orchestratePipeline(jobId: string, fileHash: string, bookId: string, mode: string = 'full'): Promise<void> {
+    // Look up the catalog to decide which pipeline to run.
+    const catalog = await bookRepository.findCatalogByHash(fileHash);
+    if (catalog?.format === 'epub') {
+      return orchestrateEpubPipeline(jobId, fileHash, bookId);
+    }
+    return orchestratePdfPipeline(jobId, fileHash, bookId, mode);
+  },
+
+  /** Cancel a processing job */
+  async cancelJob(jobId: string): Promise<void> {
+    await processingLogRepository.append(jobId, 'cancel', 'Processing cancelled by user');
+    await processingLogRepository.failJob(jobId, 'Cancelled by user');
+    const job = await processingLogRepository.getJob(jobId);
+    if (job?.bookId) {
+      // Clean up: delete chapters/sections created during processing, reset book status
+      await db.delete(sections).where(eq(sections.bookId, job.bookId));
+      await db.delete(chapters).where(eq(chapters.bookId, job.bookId));
+      await bookRepository.update(job.bookId, { processingStatus: 'error' });
+    }
+  },
+};
+
+/**
+ * Original PDF pipeline — 8 stages (download, metadata, toc, structure,
+ * text extraction, Mathpix, OCR, cover + finalize). Unchanged by the EPUB
+ * feature beyond being extracted from orchestratePipeline as a private fn.
+ */
+async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: string, mode: string = 'full'): Promise<void> {
     try {
       // ── Stage 1: Download PDF (0-5%) ──────────────────────────────
       await processingLogRepository.updateJobProgress(jobId, 0, 'download');
@@ -365,21 +396,101 @@ export const processingService = {
       await processingLogRepository.failJob(jobId, errorMessage);
       await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
     }
-  },
+}
 
-  /** Cancel a processing job */
-  async cancelJob(jobId: string): Promise<void> {
-    await processingLogRepository.append(jobId, 'cancel', 'Processing cancelled by user');
-    await processingLogRepository.failJob(jobId, 'Cancelled by user');
-    const job = await processingLogRepository.getJob(jobId);
-    if (job?.bookId) {
-      // Clean up: delete chapters/sections created during processing, reset book status
-      await db.delete(sections).where(eq(sections.bookId, job.bookId));
-      await db.delete(chapters).where(eq(chapters.bookId, job.bookId));
-      await bookRepository.update(job.bookId, { processingStatus: 'error' });
+// ─── EPUB pipeline ─────────────────────────────────────────────────────────
+/**
+ * EPUB processing pipeline — much simpler than PDF. No Mathpix, no OCR, no
+ * pdfjs. Stages: download, parse (unzip + OPF + chapters), structure (one
+ * chapter per EPUB chapter, one section per chapter), cover, finalize.
+ */
+async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: string): Promise<void> {
+  try {
+    // ── Stage 1: Download (0-10%) ────────────────────────────────
+    await processingLogRepository.updateJobProgress(jobId, 0, 'download');
+    await processingLogRepository.append(jobId, 'download', 'Downloading EPUB from storage...');
+
+    const [file] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
+    if (!file) throw new Error('EPUB file not found in storage');
+
+    const epubBuffer = await storageService.downloadPdf(file.r2Key);
+    await processingLogRepository.updateJobProgress(jobId, 10, 'download');
+    await processingLogRepository.append(jobId, 'download', `EPUB downloaded (${(epubBuffer.length / 1024).toFixed(0)} KB)`);
+
+    // ── Stage 2: Parse (10-40%) ──────────────────────────────────
+    await processingLogRepository.updateJobProgress(jobId, 10, 'parse');
+    await processingLogRepository.append(jobId, 'parse', 'Parsing EPUB structure...');
+
+    const book = parseEpub(epubBuffer);
+    if (book.chapters.length === 0) {
+      throw new Error('EPUB contains no readable chapters');
     }
-  },
-};
+    await processingLogRepository.append(jobId, 'parse', `Parsed ${book.chapters.length} chapter(s), title="${book.title}", author="${book.author ?? 'unknown'}"`);
+    await processingLogRepository.updateJobProgress(jobId, 40, 'parse');
+
+    // ── Stage 3: Structure + text (40-85%) ───────────────────────
+    await processingLogRepository.updateJobProgress(jobId, 40, 'structure');
+    await processingLogRepository.append(jobId, 'structure', 'Writing chapters and sections to the database...');
+
+    // EPUBs don't have real pages. Use chapterIndex as the page number so the
+    // existing page-based progress + navigation logic still works.
+    let sectionOrder = 0;
+    for (const ch of book.chapters) {
+      const chapter = await chapterRepository.create({
+        bookId,
+        title: ch.title,
+        startPage: ch.chapterIndex,
+        endPage: ch.chapterIndex,
+        sortOrder: ch.chapterIndex - 1,
+      });
+      await sectionRepository.create({
+        bookId,
+        chapterId: chapter.id,
+        title: ch.title,
+        startPage: ch.chapterIndex,
+        endPage: ch.chapterIndex,
+        sectionType: 'content',
+        sortOrder: ++sectionOrder,
+        extractedText: ch.plainText,
+      });
+      const pct = 40 + Math.round((sectionOrder / book.chapters.length) * 45);
+      await processingLogRepository.updateJobProgress(jobId, pct, 'structure');
+    }
+    await processingLogRepository.append(jobId, 'structure', `Wrote ${book.chapters.length} section(s) with extracted text`);
+
+    // ── Stage 4: Cover (85-95%) ──────────────────────────────────
+    await processingLogRepository.updateJobProgress(jobId, 85, 'cover');
+    const catalog = await bookRepository.findCatalogByHash(fileHash);
+    if (catalog && !catalog.coverUrl && book.coverImage) {
+      const mime = book.coverMimeType || 'image/jpeg';
+      const coverBase64 = `data:${mime};base64,${book.coverImage.toString('base64')}`;
+      await bookRepository.updateCatalog(catalog.id, {
+        coverUrl: coverBase64,
+        // Backfill title/author from EPUB metadata if the user accepted the default
+        title: catalog.title && catalog.title !== 'Untitled' ? catalog.title : book.title,
+        author: catalog.author ?? book.author ?? undefined,
+        totalPages: book.chapters.length,
+      });
+      await processingLogRepository.append(jobId, 'cover', 'Cover extracted from EPUB metadata');
+    } else if (catalog && !catalog.coverUrl) {
+      await processingLogRepository.append(jobId, 'cover', 'EPUB has no cover image — skipping', 'warn');
+    } else {
+      await processingLogRepository.append(jobId, 'cover', 'Cover already exists — skipping');
+    }
+    await processingLogRepository.updateJobProgress(jobId, 95, 'cover');
+
+    // ── Stage 5: Finalize (95-100%) ──────────────────────────────
+    await processingLogRepository.updateJobProgress(jobId, 95, 'finalize');
+    await bookRepository.update(bookId, { processingStatus: 'complete', structureSource: 'epub' });
+    await processingLogRepository.completeJob(jobId);
+    await processingLogRepository.append(jobId, 'finalize', 'EPUB processing complete');
+  } catch (error: any) {
+    const errorMessage = error.message ?? 'Unknown error';
+    await processingLogRepository.append(jobId, 'error', `EPUB pipeline failed: ${errorMessage}`, 'error');
+    await processingLogRepository.failJob(jobId, errorMessage);
+    await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
+  }
+}
 
 // ─── Helper: Build structure from PDF outline/TOC ───────────────────────────
 // Ported from frontend's buildStructureFromOutline + walkOutlineTree + flattenOutline
