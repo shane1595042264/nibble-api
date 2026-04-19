@@ -57,6 +57,7 @@ app.post('/billing/webhook', async (c) => {
 
 // Auth-protected routes
 app.use('/books/*', authMiddleware);
+app.use('/books/:id/suggest-structure', rateLimiter(60), aiAccessMiddleware);
 app.use('/chapters/*', authMiddleware);
 app.use('/sections/*', authMiddleware);
 app.use('/vocabulary/*', authMiddleware);
