@@ -25,11 +25,11 @@ const createBookSchema = z.object({
   coverUrl: z.string().url().optional(),
 });
 
+// processingStatus and structureSource are backend-managed (processing worker writes)
+// and intentionally omitted here so clients cannot overwrite them.
 const updateBookSchema = z.object({
   customTitle: z.string().optional(),
   coverUrl: z.string().url().optional(),
-  structureSource: z.string().optional(),
-  processingStatus: z.string().optional(),
   lastReadAt: z.string().datetime().optional(),
   lastAccessedSectionId: z.string().uuid().optional(),
   lastAccessedScrollProgress: z.number().min(0).max(1).optional(),

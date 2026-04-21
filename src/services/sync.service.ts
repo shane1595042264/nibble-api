@@ -64,6 +64,39 @@ function coerceDates(entity: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+// Allowlists for book create/update via sync. Columns not listed here —
+// processingStatus, structureSource, userId, catalogId (on update), etc. —
+// are backend-managed and must not be writable by the client.
+const BOOK_CREATE_FIELDS = [
+  'id',
+  'catalogId',
+  'customTitle',
+  'coverUrl',
+  'lastReadAt',
+  'lastAccessedSectionId',
+  'lastAccessedScrollProgress',
+  'lastAccessedWordIndex',
+  'createdAt',
+  'updatedAt',
+] as const;
+
+const BOOK_UPDATE_FIELDS = [
+  'customTitle',
+  'coverUrl',
+  'lastReadAt',
+  'lastAccessedSectionId',
+  'lastAccessedScrollProgress',
+  'lastAccessedWordIndex',
+] as const;
+
+function pickFields(entity: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of fields) {
+    if (k in entity && entity[k] !== undefined) out[k] = entity[k];
+  }
+  return out;
+}
+
 /**
  * Resolve reading-progress conflicts for sections.
  * - isRead=true always wins over false, regardless of timestamp.
@@ -166,7 +199,7 @@ export const syncService = {
         const server = serverBookMap.get(clientBook.id) ?? null;
         if (!server) {
           await bookRepository.create({
-            ...coerced,
+            ...pickFields(coerced, BOOK_CREATE_FIELDS),
             userId,
           } as any);
         } else {
@@ -175,11 +208,10 @@ export const syncService = {
           const clientTime = new Date(clientBook.updatedAt).getTime();
           const serverTime = new Date(server.updatedAt).getTime();
           if (clientTime > serverTime) {
-            const { id, createdAt, updatedAt, ...data } = coerced;
             if (clientBook.deletedAt) {
               await bookRepository.softDelete(clientBook.id);
             } else {
-              await bookRepository.update(clientBook.id, data as any);
+              await bookRepository.update(clientBook.id, pickFields(coerced, BOOK_UPDATE_FIELDS) as any);
             }
           }
         }
