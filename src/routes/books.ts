@@ -26,7 +26,8 @@ const createBookSchema = z.object({
 });
 
 // processingStatus and structureSource are backend-managed (processing worker writes)
-// and intentionally omitted here so clients cannot overwrite them.
+// and intentionally omitted here. .strict() makes clients get a 400 when they send
+// any unlisted field rather than having it silently stripped.
 const updateBookSchema = z.object({
   customTitle: z.string().optional(),
   coverUrl: z.string().url().optional(),
@@ -34,7 +35,7 @@ const updateBookSchema = z.object({
   lastAccessedSectionId: z.string().uuid().optional(),
   lastAccessedScrollProgress: z.number().min(0).max(1).optional(),
   lastAccessedWordIndex: z.coerce.number().int().optional(),
-});
+}).strict();
 
 // ─── Routes ────────────────────────────────────────────────────────
 
