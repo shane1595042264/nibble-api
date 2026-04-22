@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { userRepository } from '../repositories/user.repository.js';
 import { storageService } from '../services/storage.service.js';
 import { AppError } from '../lib/errors.js';
+import { rateLimiter } from '../middleware/rate-limit.js';
 
 export const userRoutes = new Hono();
 
@@ -91,7 +92,7 @@ const passwordSchema = z.object({
   newPassword: z.string().min(MIN_PASSWORD_LENGTH),
 });
 
-userRoutes.post('/me/password', async (c) => {
+userRoutes.post('/me/password', rateLimiter(5, 3600000), async (c) => {
   const user = c.get('user');
   const body = await c.req.json();
   const parsed = passwordSchema.safeParse(body);
