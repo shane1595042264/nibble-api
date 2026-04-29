@@ -22,12 +22,30 @@ const explainSchema = z.object({
 });
 
 // OCR — extract text from page images using Claude Vision
+// Bounds protect against memory/cost DoS: a single authenticated request
+// could otherwise pin the event loop and burn the Anthropic budget on
+// hundreds of MB of base64 images. Frontend chunks at PAGES_PER_BATCH=10
+// (WordByWord/src/lib/services/book-processing-service.ts), so the array
+// max of 12 leaves headroom without enabling abuse.
+const OCR_MAX_IMAGES = 12;
+const OCR_MAX_BASE64_PER_IMAGE = 7_000_000; // ~5.25 MB raw
+const OCR_MIN_BASE64_PER_IMAGE = 100; // tiny strings always fail Claude Vision
+const OCR_MAX_TOTAL_BASE64 = 50_000_000; // ~37 MB raw across the whole request
+
+const ocrSchema = z.object({
+  images: z
+    .array(z.string().min(OCR_MIN_BASE64_PER_IMAGE).max(OCR_MAX_BASE64_PER_IMAGE))
+    .min(1)
+    .max(OCR_MAX_IMAGES)
+    .refine(
+      (imgs) => imgs.reduce((sum, s) => sum + s.length, 0) <= OCR_MAX_TOTAL_BASE64,
+      { message: 'Total payload exceeds OCR size limit' }
+    ),
+});
+
 aiRoutes.post('/ocr', async (c) => {
   const body = await c.req.json();
-  const schema = z.object({
-    images: z.array(z.string().min(1)),
-  });
-  const parsed = schema.safeParse(body);
+  const parsed = ocrSchema.safeParse(body);
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
   }
