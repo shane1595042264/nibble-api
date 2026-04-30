@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
+import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
 
 export const vocabularyRoutes = new Hono();
@@ -64,6 +65,9 @@ vocabularyRoutes.post('/', async (c) => {
   const parsed = createVocabSchema.safeParse(body);
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+  if (parsed.data.bookId) {
+    await bookService.getBook(parsed.data.bookId, user.id);
   }
   const entry = await vocabularyRepository.create({ ...parsed.data, userId: user.id });
   return c.json(entry, 201);
