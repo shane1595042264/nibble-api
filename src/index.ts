@@ -56,8 +56,8 @@ app.post('/billing/webhook', async (c) => {
 });
 
 // Auth-protected routes
+app.use('/books/upload', authMiddleware, rateLimiter(15, 3600000));
 app.use('/books/*', authMiddleware);
-app.use('/books/upload', rateLimiter(15, 3600000));
 app.use('/books/:id/suggest-structure', rateLimiter(60), aiAccessMiddleware);
 app.use('/chapters/*', authMiddleware, rateLimiter(120));
 app.use('/sections/*', authMiddleware, rateLimiter(120));
