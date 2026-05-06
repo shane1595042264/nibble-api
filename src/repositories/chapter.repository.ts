@@ -1,6 +1,7 @@
 import { eq, and, isNull, gte, asc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { chapters } from '../db/schema.js';
+import { MAX_LIST_ROWS, warnIfCapped } from '../lib/query-guards.js';
 
 export const chapterRepository = {
   async findById(id: string) {
@@ -13,11 +14,13 @@ export const chapterRepository = {
   },
 
   async findByBookId(bookId: string) {
-    return db
+    const rows = await db
       .select()
       .from(chapters)
       .where(and(eq(chapters.bookId, bookId), isNull(chapters.deletedAt)))
-      .orderBy(asc(chapters.sortOrder));
+      .orderBy(asc(chapters.sortOrder))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'chapters', scope: { bookId } });
   },
 
   async create(data: {
@@ -84,25 +87,31 @@ export const chapterRepository = {
   },
 
   async findModifiedSince(bookId: string, since: Date) {
-    return db
+    const rows = await db
       .select()
       .from(chapters)
-      .where(and(eq(chapters.bookId, bookId), gte(chapters.updatedAt, since)));
+      .where(and(eq(chapters.bookId, bookId), gte(chapters.updatedAt, since)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'chapters', scope: { bookId, since: since.toISOString() } });
   },
 
   async findModifiedSinceForBooks(bookIds: string[], since: Date) {
     if (bookIds.length === 0) return [];
-    return db
+    const rows = await db
       .select()
       .from(chapters)
-      .where(and(inArray(chapters.bookId, bookIds), gte(chapters.updatedAt, since)));
+      .where(and(inArray(chapters.bookId, bookIds), gte(chapters.updatedAt, since)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'chapters', scope: { bookCount: bookIds.length, since: since.toISOString() } });
   },
 
   async findByIds(ids: string[]) {
     if (ids.length === 0) return [];
-    return db
+    const rows = await db
       .select()
       .from(chapters)
-      .where(and(inArray(chapters.id, ids), isNull(chapters.deletedAt)));
+      .where(and(inArray(chapters.id, ids), isNull(chapters.deletedAt)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'chapters', scope: { idsRequested: ids.length } });
   },
 };

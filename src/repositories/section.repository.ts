@@ -1,6 +1,7 @@
 import { eq, and, isNull, gte, asc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { sections } from '../db/schema.js';
+import { MAX_LIST_ROWS, warnIfCapped } from '../lib/query-guards.js';
 
 export const sectionRepository = {
   async findById(id: string) {
@@ -13,21 +14,25 @@ export const sectionRepository = {
   },
 
   async findByBookId(bookId: string) {
-    return db
+    const rows = await db
       .select()
       .from(sections)
       .where(and(eq(sections.bookId, bookId), isNull(sections.deletedAt)))
-      .orderBy(asc(sections.sortOrder));
+      .orderBy(asc(sections.sortOrder))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'sections', scope: { bookId } });
   },
 
   async findByChapterId(chapterId: string) {
-    return db
+    const rows = await db
       .select()
       .from(sections)
       .where(
         and(eq(sections.chapterId, chapterId), isNull(sections.deletedAt)),
       )
-      .orderBy(asc(sections.sortOrder));
+      .orderBy(asc(sections.sortOrder))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'sections', scope: { chapterId } });
   },
 
   async create(data: {
@@ -131,26 +136,32 @@ export const sectionRepository = {
 
   async findByIds(ids: string[]) {
     if (ids.length === 0) return [];
-    return db
+    const rows = await db
       .select()
       .from(sections)
-      .where(and(inArray(sections.id, ids), isNull(sections.deletedAt)));
+      .where(and(inArray(sections.id, ids), isNull(sections.deletedAt)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'sections', scope: { idsRequested: ids.length } });
   },
 
   async findModifiedSince(bookId: string, since: Date) {
-    return db
+    const rows = await db
       .select()
       .from(sections)
       .where(
         and(eq(sections.bookId, bookId), gte(sections.updatedAt, since)),
-      );
+      )
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'sections', scope: { bookId, since: since.toISOString() } });
   },
 
   async findModifiedSinceForBooks(bookIds: string[], since: Date) {
     if (bookIds.length === 0) return [];
-    return db
+    const rows = await db
       .select()
       .from(sections)
-      .where(and(inArray(sections.bookId, bookIds), gte(sections.updatedAt, since)));
+      .where(and(inArray(sections.bookId, bookIds), gte(sections.updatedAt, since)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'sections', scope: { bookCount: bookIds.length, since: since.toISOString() } });
   },
 };

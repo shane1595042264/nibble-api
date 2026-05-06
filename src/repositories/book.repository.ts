@@ -1,6 +1,7 @@
 import { eq, and, isNull, gte, sql, desc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { books, bookCatalog, chapters, sections, vocabulary } from '../db/schema.js';
+import { MAX_LIST_ROWS, warnIfCapped } from '../lib/query-guards.js';
 
 export const bookRepository = {
   // ─── User books ────────────────────────────────────────────────
@@ -15,10 +16,12 @@ export const bookRepository = {
   },
 
   async findByUserId(userId: string) {
-    return db
+    const rows = await db
       .select()
       .from(books)
-      .where(and(eq(books.userId, userId), isNull(books.deletedAt)));
+      .where(and(eq(books.userId, userId), isNull(books.deletedAt)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'books', userId });
   },
 
   async findByUserIdAndCatalogId(userId: string, catalogId: string) {
@@ -121,17 +124,21 @@ export const bookRepository = {
 
   async findByIds(ids: string[]) {
     if (ids.length === 0) return [];
-    return db
+    const rows = await db
       .select()
       .from(books)
-      .where(and(inArray(books.id, ids), isNull(books.deletedAt)));
+      .where(and(inArray(books.id, ids), isNull(books.deletedAt)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'books', scope: { idsRequested: ids.length } });
   },
 
   async findModifiedSince(userId: string, since: Date) {
-    return db
+    const rows = await db
       .select()
       .from(books)
-      .where(and(eq(books.userId, userId), gte(books.updatedAt, since)));
+      .where(and(eq(books.userId, userId), gte(books.updatedAt, since)))
+      .limit(MAX_LIST_ROWS);
+    return warnIfCapped(rows, { entity: 'books', userId, scope: { since: since.toISOString() } });
   },
 
   // ─── Book catalog ─────────────────────────────────────────────
