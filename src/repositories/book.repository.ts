@@ -169,12 +169,18 @@ export const bookRepository = {
     return catalog ?? null;
   },
 
-  async findCatalogByFuzzyTitle(title: string) {
-    return db
+  async findCatalogByFuzzyTitle(title: string, limit: number = MAX_LIST_ROWS) {
+    const cap = Math.min(limit, MAX_LIST_ROWS);
+    const rows = await db
       .select()
       .from(bookCatalog)
       .where(sql`similarity(${bookCatalog.title}, ${title}) > 0.3`)
-      .orderBy(desc(sql`similarity(${bookCatalog.title}, ${title})`));
+      .orderBy(desc(sql`similarity(${bookCatalog.title}, ${title})`))
+      .limit(cap);
+    return warnIfCapped(rows, {
+      entity: 'bookCatalog',
+      scope: { fuzzyTitle: title, limit: cap },
+    });
   },
 
   async createCatalog(data: {

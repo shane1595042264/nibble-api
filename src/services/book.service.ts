@@ -71,10 +71,11 @@ export const bookService = {
     const exactMatch = await bookRepository.findCatalogByHash(fileHash);
     if (exactMatch) return { exactMatch, fuzzyMatches: [] };
 
-    // 2. If no exact match and title given, fuzzy search
+    // 2. If no exact match and title given, fuzzy search.
+    // Cap at top 25 — the upload UI only surfaces a handful of duplicate candidates.
     let fuzzyMatches: any[] = [];
     if (title) {
-      fuzzyMatches = await bookRepository.findCatalogByFuzzyTitle(title);
+      fuzzyMatches = await bookRepository.findCatalogByFuzzyTitle(title, 25);
     }
 
     return { exactMatch: null, fuzzyMatches };
