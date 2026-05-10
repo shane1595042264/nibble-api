@@ -171,16 +171,30 @@ export const bookRepository = {
 
   async findCatalogByFuzzyTitle(title: string, limit: number = MAX_LIST_ROWS) {
     const cap = Math.min(limit, MAX_LIST_ROWS);
-    const rows = await db
-      .select()
-      .from(bookCatalog)
-      .where(sql`similarity(${bookCatalog.title}, ${title}) > 0.3`)
-      .orderBy(desc(sql`similarity(${bookCatalog.title}, ${title})`))
-      .limit(cap);
-    return warnIfCapped(rows, {
-      entity: 'bookCatalog',
-      scope: { fuzzyTitle: title, limit: cap },
-    });
+    try {
+      const rows = await db
+        .select()
+        .from(bookCatalog)
+        .where(sql`similarity(${bookCatalog.title}, ${title}) > 0.3`)
+        .orderBy(desc(sql`similarity(${bookCatalog.title}, ${title})`))
+        .limit(cap);
+      return warnIfCapped(rows, {
+        entity: 'bookCatalog',
+        scope: { fuzzyTitle: title, limit: cap },
+      });
+    } catch (err) {
+      // pg_trgm extension missing — degrade to empty result instead of 500.
+      // Migration 0012 enables it, but guard in case it's ever stripped.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('similarity') || msg.includes('pg_trgm')) {
+        console.warn(
+          '[book.repository] findCatalogByFuzzyTitle degraded to [] — pg_trgm unavailable: ' +
+            msg,
+        );
+        return [];
+      }
+      throw err;
+    }
   },
 
   async createCatalog(data: {
