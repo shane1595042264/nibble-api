@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
+import Stripe from 'stripe';
 import { config } from './lib/config.js';
 import { db } from './db/index.js';
 import { corsMiddleware } from './middleware/cors.js';
@@ -46,13 +47,20 @@ app.post('/billing/webhook', async (c) => {
   const body = await c.req.text();
   try {
     await billingService.handleWebhook(body, signature);
+    return c.json({ received: true });
   } catch (err) {
     console.error('[Stripe Webhook] Failed to process event:', {
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
+    // Bad signature: 400. Stripe doesn't retry these — correct behavior.
+    if (err instanceof Stripe.errors.StripeSignatureVerificationError) {
+      return c.json({ error: 'Invalid signature' }, 400);
+    }
+    // Anything else (DB glitch, runtime error): 500 so Stripe retries.
+    // The webhookEvents idempotency guard makes retries safe.
+    return c.json({ error: 'Webhook processing failed' }, 500);
   }
-  return c.json({ received: true });
 });
 
 // Auth-protected routes
