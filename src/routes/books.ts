@@ -202,22 +202,22 @@ bookRoutes.put('/:id/metadata', async (c) => {
 // ─── Smart Split: Structure endpoints ─────────────────────────────
 
 const chapterItemSchema = z.object({
-  title: z.string(),
+  title: z.string().max(500),
   startPage: z.number().int().positive(),
   endPage: z.number().int().positive(),
   sections: z.array(z.object({
-    title: z.string(),
+    title: z.string().max(500),
     startPage: z.number().int().positive(),
     endPage: z.number().int().positive(),
   }).refine(s => s.startPage <= s.endPage, {
     message: 'Section startPage must be <= endPage',
-  })).optional(),
+  })).max(200).optional(),
 }).refine(ch => ch.startPage <= ch.endPage, {
   message: 'Chapter startPage must be <= endPage',
 });
 
 const structureSchema = z.object({
-  chapters: z.array(chapterItemSchema).refine((chapters) => {
+  chapters: z.array(chapterItemSchema).max(500).refine((chapters) => {
     for (let i = 0; i < chapters.length; i++) {
       for (let j = i + 1; j < chapters.length; j++) {
         const a = chapters[i];
@@ -232,7 +232,7 @@ const structureSchema = z.object({
 });
 
 const suggestStructureSchema = z.object({
-  tocPages: z.array(z.number().int().positive()).min(1),
+  tocPages: z.array(z.number().int().positive()).min(1).max(20),
 });
 
 // PUT /:id/structure — replace entire chapter/section structure
