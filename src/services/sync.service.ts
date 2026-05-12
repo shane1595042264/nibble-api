@@ -36,6 +36,12 @@ interface SyncResponse {
     exerciseProgress: SyncEntity[];
     exercises: SyncEntity[];
   };
+  failedEntities: {
+    books: string[];
+    chapters: string[];
+    sections: string[];
+    vocabulary: string[];
+  };
   syncedAt: string;
 }
 
@@ -142,6 +148,14 @@ export const syncService = {
   async sync(userId: string, payload: SyncPayload): Promise<SyncResponse> {
     const since = new Date(payload.lastSyncedAt);
 
+    // Per-entity push failures so the client can re-bump updatedAt and retry instead of losing the change when lastSyncedAt advances.
+    const failedEntities = {
+      books: [] as string[],
+      chapters: [] as string[],
+      sections: [] as string[],
+      vocabulary: [] as string[],
+    };
+
     // ── 1. Apply client changes ──────────────────────────────────
 
     // Pre-load referenced books and chapters into Sets for O(1) existence checks
@@ -215,7 +229,10 @@ export const syncService = {
             }
           }
         }
-      } catch (e) { console.error('[sync] book error:', clientBook.id, e); }
+      } catch (e) {
+        console.error('[sync] book error:', clientBook.id, e);
+        failedEntities.books.push(clientBook.id);
+      }
     }
 
     // After processing books, update the existence set so child entities aren't skipped
@@ -252,7 +269,10 @@ export const syncService = {
             }
           }
         }
-      } catch (e) { console.error('[sync] chapter error:', clientChapter.id, e); }
+      } catch (e) {
+        console.error('[sync] chapter error:', clientChapter.id, e);
+        failedEntities.chapters.push(clientChapter.id);
+      }
     }
 
     // After processing chapters, update the existence set so sections aren't skipped
@@ -304,7 +324,10 @@ export const syncService = {
             await sectionRepository.update(clientSection.id, progressMerge as any);
           }
         }
-      } catch (e) { console.error('[sync] section error:', clientSection.id, e); }
+      } catch (e) {
+        console.error('[sync] section error:', clientSection.id, e);
+        failedEntities.sections.push(clientSection.id);
+      }
     }
 
     // Vocabulary
@@ -334,7 +357,10 @@ export const syncService = {
             }
           }
         }
-      } catch (e) { console.error('[sync] vocab error:', clientWord.id, e); }
+      } catch (e) {
+        console.error('[sync] vocab error:', clientWord.id, e);
+        failedEntities.vocabulary.push(clientWord.id);
+      }
     }
 
     // Settings
@@ -446,6 +472,7 @@ export const syncService = {
         exerciseProgress: serverExerciseProgress as unknown as SyncEntity[],
         exercises: serverExercises,
       },
+      failedEntities,
       syncedAt: new Date().toISOString(),
     };
   },
