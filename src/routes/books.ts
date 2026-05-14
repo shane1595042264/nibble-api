@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { bookService } from '../services/book.service.js';
 import { AppError } from '../lib/errors.js';
 import { config } from '../lib/config.js';
+import { HAIKU_MODEL } from '../lib/ai-models.js';
 
 export const bookRoutes = new Hono();
 
@@ -452,7 +453,7 @@ Now parse the following TOC:`,
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic({ timeout: 30_000 });
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: HAIKU_MODEL,
       max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],

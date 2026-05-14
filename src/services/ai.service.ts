@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../lib/config.js';
+import { SONNET_MODEL, HAIKU_MODEL } from '../lib/ai-models.js';
 
 const anthropic = config.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: config.ANTHROPIC_API_KEY, timeout: 30_000 })
@@ -56,7 +57,7 @@ ${tocIfAvailable ? `Known table of contents:\n${tocIfAvailable}\n` : ''}
 Respond with a JSON array of PageAnalysis objects.`;
 
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: SONNET_MODEL,
         max_tokens: 4096,
         system: systemPrompt,
         messages: [{
@@ -151,7 +152,7 @@ Respond with a JSON array of PageAnalysis objects.`;
       }
 
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: SONNET_MODEL,
         max_tokens: 4096,
         messages: [{ role: 'user', content }],
         system: 'You are a math region detector. For each page image, return a JSON array of bounding boxes {page, regions: [{x, y, w, h}]} for mathematical formulas. Respond only with JSON.',
@@ -176,7 +177,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     if (!anthropic) throw new Error('Anthropic not configured');
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: SONNET_MODEL,
       max_tokens: 4096,
       messages: [{
         role: 'user',
@@ -211,7 +212,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     if (!anthropic) throw new Error('Anthropic not configured');
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: SONNET_MODEL,
       max_tokens: 500,
       messages: [{
         role: 'user',
@@ -232,7 +233,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     if (!anthropic) throw new Error('Anthropic not configured');
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: SONNET_MODEL,
       max_tokens: 1000,
       messages: [{
         role: 'user',
@@ -247,7 +248,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     if (!anthropic) throw new Error('Anthropic not configured');
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: SONNET_MODEL,
       max_tokens: 1000,
       messages: [{
         role: 'user',
@@ -281,7 +282,7 @@ Respond in this exact JSON format only, no other text:
 {"pronunciation": "/.../ ", "translation": "...", "partOfSpeech": "..."}`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: HAIKU_MODEL,
       max_tokens: 150,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -314,7 +315,7 @@ Sentence: "${sentence}"
 Paragraph context: "${paragraphContext}"`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: HAIKU_MODEL,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -332,7 +333,7 @@ Paragraph context: "${paragraphContext}"`;
     const prompt = `Explain briefly (under 100 words) why the English word "${word}" is translated as "${translation}" in ${targetLanguage}, given the sentence: "${sentence}". Focus on how the sentence context determines this specific meaning. Be concise and direct.`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: HAIKU_MODEL,
       max_tokens: 200,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -355,7 +356,7 @@ ${surroundingContext}
 Give a clear explanation in English. If it's a table, explain what the data represents. If it's code, explain the algorithm. If it's a formula, explain what each variable means. Be thorough but concise.`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: HAIKU_MODEL,
       max_tokens: 500,
       messages: [{ role: 'user', content: prompt }],
     });
