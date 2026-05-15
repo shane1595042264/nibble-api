@@ -82,6 +82,11 @@ sectionRoutes.post('/', async (c) => {
   }
   // Verify the book belongs to the user
   await bookService.getBook(parsed.data.bookId, user.id);
+  // Verify the chapter exists and belongs to the same book (prevents cross-tenant chapterId injection)
+  const chapter = await chapterRepository.findById(parsed.data.chapterId);
+  if (!chapter || chapter.bookId !== parsed.data.bookId) {
+    throw Errors.notFound('Chapter');
+  }
   const section = await sectionRepository.create(parsed.data);
   return c.json(section, 201);
 });
