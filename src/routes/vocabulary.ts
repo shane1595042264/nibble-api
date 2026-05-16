@@ -3,6 +3,10 @@ import { z } from 'zod';
 import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
+import {
+  forwardVocabToKnowledgeBase,
+  knowledgeEntryToLegacyVocab,
+} from '../services/knowledge-base.service.js';
 
 export const vocabularyRoutes = new Hono();
 
@@ -67,10 +71,17 @@ vocabularyRoutes.post('/', async (c) => {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
   }
   if (parsed.data.bookId) {
+    // Still validate the book belongs to the user — protects against captures
+    // for books they don't own even though we no longer store the FK locally.
     await bookService.getBook(parsed.data.bookId, user.id);
   }
-  const entry = await vocabularyRepository.create({ ...parsed.data, userId: user.id });
-  return c.json(entry, 201);
+
+  // 2026-05-16: the personal-website knowledge base is the sole source of
+  // truth for vocab. We forward the entry up there and return its response
+  // shaped like the legacy nibble-api response so the WordByWord sync layer
+  // doesn't need to know about the migration.
+  const knowledgeEntry = await forwardVocabToKnowledgeBase(parsed.data);
+  return c.json(knowledgeEntryToLegacyVocab(knowledgeEntry, parsed.data), 201);
 });
 
 vocabularyRoutes.put('/:id', async (c) => {

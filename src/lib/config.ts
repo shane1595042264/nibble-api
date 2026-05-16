@@ -18,6 +18,12 @@ const envSchema = z.object({
   PROCESSING_PRICE_PER_PAGE_CENTS: z.coerce.number().default(5),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
   FREE_AI_EMAILS: z.string().default(''),
+  // Personal-website knowledge base — POST /api/knowledge/notes accepts vocab pushes.
+  // Empty string disables the forwarder (vocab writes will 503).
+  KNOWLEDGE_BASE_URL: z
+    .string()
+    .default('https://shanebackend-production.up.railway.app'),
+  KNOWLEDGE_BASE_PAT: z.string().default(''),
 });
 
 export const config = envSchema.parse(process.env);
