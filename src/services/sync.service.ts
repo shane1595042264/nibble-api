@@ -4,6 +4,7 @@ import { sectionRepository } from '../repositories/section.repository.js';
 import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { settingsRepository } from '../repositories/settings.repository.js';
 import { exerciseRepository } from '../repositories/exercise.repository.js';
+import { forwardVocabToKnowledgeBase } from './knowledge-base.service.js';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -341,6 +342,35 @@ export const syncService = {
         const coerced = coerceDates(clientWord);
         const server = serverVocabMap.get(clientWord.id) ?? null;
         if (!server) {
+          // 2026-05-16: forward NEW vocab captures up to the personal-website
+          // knowledge base. We still write a local row so the sync bookkeeping
+          // (server-changes for incremental pulls, dirty-flag clearing on the
+          // client) keeps working — but the user-facing source of truth for
+          // vocab is now the knowledge base, not this PG table.
+          //
+          // If the forward fails the local insert is skipped and the entry is
+          // pushed onto failedEntities so the WordByWord sync layer re-bumps
+          // updatedAt and retries on the next tick. That preserves the
+          // local-first guarantee: IndexedDB still has the word; it just
+          // hasn't reached the knowledge base yet.
+          try {
+            await forwardVocabToKnowledgeBase({
+              word: String(clientWord.word ?? ''),
+              pronunciation: (clientWord.pronunciation as string) ?? undefined,
+              translation: (clientWord.translation as string) ?? undefined,
+              targetLanguage: (clientWord.targetLanguage as string) ?? undefined,
+              definition: (clientWord.definition as string) ?? undefined,
+              contextSentence: (clientWord.contextSentence as string) ?? undefined,
+              explanation: (clientWord.explanation as string) ?? undefined,
+              bookTitle: (clientWord.bookTitle as string) ?? undefined,
+              sectionTitle: (clientWord.sectionTitle as string) ?? undefined,
+              page: (clientWord.page as number) ?? undefined,
+            });
+          } catch (forwardErr) {
+            console.error('[sync] forward to knowledge base failed:', clientWord.id, forwardErr);
+            failedEntities.vocabulary.push(clientWord.id);
+            continue;
+          }
           await vocabularyRepository.create({
             ...coerced,
             userId,
