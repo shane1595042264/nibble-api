@@ -2,6 +2,32 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+---
+
+## 0. Current State & Evolutions (READ THIS BEFORE ANYTHING ELSE)
+
+The plan below was written 2026-03-10 as the initial build-out. Most of it shipped. This section overrides anything below it when they conflict. Add a dated bullet here whenever the user's intent changes — do NOT silently delete the older sections; just note they're superseded.
+
+### 2026-05-16 — Vocab is no longer stored locally; forwarded to shanejli's knowledge base
+
+The nibble-api `vocabulary` table is no longer the source of truth for vocab. The personal-website knowledge base at https://shanebackend-production.up.railway.app/api/knowledge/notes is.
+
+- New service: `src/services/knowledge-base.service.ts` — composes a classifier-friendly text + nibbler-tagged source object and POSTs with a Bearer PAT.
+- The forward fires from `sync.service.ts` inside the `if (!server)` branch for vocabulary (the "new vocab" case), BEFORE the local insert. On failure → `failedEntities.vocabulary` so the WordByWord sync layer retries.
+- `POST /api/vocabulary` route still exists and still inserts to the local PG table — but the WordByWord frontend never calls it directly anymore. The click flow goes through `POST /api/sync`. The route is effectively dead code, kept for backward compatibility.
+- New env vars: `KNOWLEDGE_BASE_URL` (defaults to prod), `KNOWLEDGE_BASE_PAT`. PAT must be set on Railway or every new vocab forward will 503.
+- The PAT is named "nibble-api forwarder" with `knowledge:write` scope only, visible/revocable at https://shanejli.com/settings/tokens.
+- Sections below that describe `vocabularyRepository.create` as the canonical write path for vocab are historical. Read them for context, but the current write path goes through `forwardVocabToKnowledgeBase` first.
+
+**Why the change:** Shane is consolidating his knowledge surfaces. He wants one knowledge base across all his tools; the personal-website's knowledge module is the canonical store. Nibbler-side flashcards duplicated work.
+
+**Don't undo this without explicit user consent:**
+- Don't remove the forward call from `sync.service.ts`. Every new vocab MUST reach the knowledge base.
+- Don't re-enable a code path that writes vocab locally without also forwarding. If you add a new vocab write path, it goes through `forwardVocabToKnowledgeBase` too.
+- Don't change the response shape of `POST /api/sync` for vocabulary in ways that break the WordByWord dirty-flag/retry machinery. `failedEntities.vocabulary` is the retry signal.
+
+---
+
 **Goal:** Build the backend API for WordByWord — a local-first AI-powered PDF reading tracker for technical books. The core product is converting plain PDFs into modularized, structured, atomic `.nib` format using Claude AI + Mathpix (LaTeX/math).
 
 **Architecture:** Hybrid local-first. The frontend (Next.js) handles PDF rendering, .nib interactions, and offline reading. The backend handles auth, cloud sync, AI proxying, PDF processing, and billing. Each user gets their own isolated cloud space.
