@@ -11,21 +11,49 @@ const MAX_ORPHAN_RECLAIMS_PER_RUN = 100;
  * Deletes in child-first order to respect foreign key constraints.
  * Then reclaims R2 objects + catalog rows for catalogs no longer referenced
  * by any books row (active OR soft-deleted).
+ *
+ * Per-table failures are caught and logged. setInterval cannot recover from
+ * unhandled rejections — one FK violation must not crash the whole process.
  */
 export async function runCleanup() {
   const cutoff = new Date(Date.now() - THIRTY_DAYS_MS);
 
-  // Children first, then parents
-  const tables = [vocabulary, exerciseProgress, sections, chapters, books];
-  for (const table of tables) {
-    await db.delete(table).where(
-      and(isNotNull(table.deletedAt), lt(table.deletedAt, cutoff)),
-    );
+  // Children first, then parents. Note: processing_jobs.book_id → books.id is
+  // FK NO ACTION (see schema.ts), so books rows still referenced by a job will
+  // fail to hard-delete. That's expected — log and move on.
+  const deleteSoftDeleted = async (
+    name: string,
+    runner: () => Promise<unknown>,
+  ) => {
+    try {
+      await runner();
+    } catch (err) {
+      console.error(`[cleanup] hard-delete failed for ${name}:`, err);
+    }
+  };
+
+  await deleteSoftDeleted('vocabulary', () =>
+    db.delete(vocabulary).where(and(isNotNull(vocabulary.deletedAt), lt(vocabulary.deletedAt, cutoff))),
+  );
+  await deleteSoftDeleted('exerciseProgress', () =>
+    db.delete(exerciseProgress).where(and(isNotNull(exerciseProgress.deletedAt), lt(exerciseProgress.deletedAt, cutoff))),
+  );
+  await deleteSoftDeleted('sections', () =>
+    db.delete(sections).where(and(isNotNull(sections.deletedAt), lt(sections.deletedAt, cutoff))),
+  );
+  await deleteSoftDeleted('chapters', () =>
+    db.delete(chapters).where(and(isNotNull(chapters.deletedAt), lt(chapters.deletedAt, cutoff))),
+  );
+  await deleteSoftDeleted('books', () =>
+    db.delete(books).where(and(isNotNull(books.deletedAt), lt(books.deletedAt, cutoff))),
+  );
+
+  try {
+    const { reclaimed, skipped } = await reclaimOrphanedStorage();
+    console.log(`Cleanup completed at ${new Date().toISOString()} — orphans reclaimed: ${reclaimed}, skipped: ${skipped}`);
+  } catch (err) {
+    console.error('[cleanup] reclaimOrphanedStorage failed:', err);
   }
-
-  const { reclaimed, skipped } = await reclaimOrphanedStorage();
-
-  console.log(`Cleanup completed at ${new Date().toISOString()} — orphans reclaimed: ${reclaimed}, skipped: ${skipped}`);
 }
 
 /**
