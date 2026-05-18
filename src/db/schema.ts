@@ -232,7 +232,7 @@ export const processingJobs = pgTable('processing_jobs', {
   id: uuid('id').primaryKey().defaultRandom(),
   fileHash: text('file_hash').notNull(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  bookId: uuid('book_id').references(() => books.id),
+  bookId: uuid('book_id').references(() => books.id, { onDelete: 'set null' }),
   status: text('status').notNull().default('pending'),
   progress: integer('progress').notNull().default(0),
   stage: text('stage'),
