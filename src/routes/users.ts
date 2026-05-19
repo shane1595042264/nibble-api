@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import { userRepository } from '../repositories/user.repository.js';
 import { storageService } from '../services/storage.service.js';
 import { AppError } from '../lib/errors.js';
-import { rateLimiter } from '../middleware/rate-limit.js';
+import { checkFailureLockout, recordFailure } from '../middleware/rate-limit.js';
 
 export const userRoutes = new Hono();
 
@@ -13,6 +13,8 @@ const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const R2_AVATAR_PREFIX = 'r2:';
 const PASSWORD_BCRYPT_ROUNDS = 12;
 const MIN_PASSWORD_LENGTH = 6;
+const PASSWORD_MAX_FAILURES = 5;
+const PASSWORD_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 
 /** If avatarUrl is an R2 key, resolve it to a fresh presigned URL. */
 async function resolveAvatarUrl(avatarUrl: string | null): Promise<string | null> {
@@ -92,7 +94,7 @@ const passwordSchema = z.object({
   newPassword: z.string().min(MIN_PASSWORD_LENGTH),
 });
 
-userRoutes.post('/me/password', rateLimiter(5, 3600000), async (c) => {
+userRoutes.post('/me/password', async (c) => {
   const user = c.get('user');
   const body = await c.req.json();
   const parsed = passwordSchema.safeParse(body);
@@ -104,11 +106,28 @@ userRoutes.post('/me/password', rateLimiter(5, 3600000), async (c) => {
   if (!full) throw new AppError('NOT_FOUND', 'User not found', 404);
 
   if (full.passwordHash) {
+    // Rate limit only applies to the change-password branch, and only counts failed
+    // bcrypt.compare attempts — not schema-validation errors. Initial-password set
+    // (OAuth users with no password yet) is not rate-limited at all.
+    const lockoutKey = `password:${user.id}`;
+    const lock = checkFailureLockout(lockoutKey, PASSWORD_MAX_FAILURES, PASSWORD_FAILURE_WINDOW_MS);
+    if (lock.locked) {
+      const retryAfter = Math.max(1, Math.ceil(lock.retryAfterMs / 1000));
+      return c.json(
+        { error: { code: 'RATE_LIMITED', message: 'Too many requests', status: 429 } },
+        429,
+        { 'Retry-After': String(retryAfter) },
+      );
+    }
+
     if (!parsed.data.currentPassword) {
       throw new AppError('VALIDATION_ERROR', 'Current password is required', 400);
     }
     const ok = await bcrypt.compare(parsed.data.currentPassword, full.passwordHash);
-    if (!ok) throw new AppError('VALIDATION_ERROR', 'Current password is incorrect', 400);
+    if (!ok) {
+      recordFailure(lockoutKey, PASSWORD_FAILURE_WINDOW_MS);
+      throw new AppError('VALIDATION_ERROR', 'Current password is incorrect', 400);
+    }
   }
 
   const passwordHash = await bcrypt.hash(parsed.data.newPassword, PASSWORD_BCRYPT_ROUNDS);

@@ -43,3 +43,36 @@ export function rateLimiter(maxRequests: number = 120, windowMs: number = 60000)
     await next();
   };
 }
+
+// Failure-only counter for endpoints where the limit should only tick on a real
+// auth failure (e.g. wrong password) — not on schema validation errors. Uses the
+// same store + cleanup as rateLimiter, with a key prefix to avoid collisions.
+const FAILURE_KEY_PREFIX = 'fail:';
+
+export function checkFailureLockout(
+  key: string,
+  maxFailures: number,
+  windowMs: number,
+): { locked: boolean; retryAfterMs: number } {
+  if (windowMs > maxWindowMs) maxWindowMs = windowMs;
+  const k = FAILURE_KEY_PREFIX + key;
+  const now = Date.now();
+  const entry = store.get(k) ?? { timestamps: [] };
+  entry.timestamps = entry.timestamps.filter(t => now - t < windowMs);
+  store.set(k, entry);
+  if (entry.timestamps.length >= maxFailures) {
+    const oldest = entry.timestamps[0]!;
+    return { locked: true, retryAfterMs: windowMs - (now - oldest) };
+  }
+  return { locked: false, retryAfterMs: 0 };
+}
+
+export function recordFailure(key: string, windowMs: number): void {
+  if (windowMs > maxWindowMs) maxWindowMs = windowMs;
+  const k = FAILURE_KEY_PREFIX + key;
+  const now = Date.now();
+  const entry = store.get(k) ?? { timestamps: [] };
+  entry.timestamps = entry.timestamps.filter(t => now - t < windowMs);
+  entry.timestamps.push(now);
+  store.set(k, entry);
+}
