@@ -135,9 +135,11 @@ function resolveConflict(
     }
   }
 
-  // scrollProgress: higher value wins
-  const clientScroll = Number(clientEntity.scrollProgress ?? 0);
-  const serverScroll = Number(serverEntity.scrollProgress ?? 0);
+  // scrollProgress: higher value wins, clamped to [0, 1] to self-heal any
+  // historical out-of-range rows that predate the sync route's Zod guard.
+  const clamp = (v: number) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0);
+  const clientScroll = clamp(Number(clientEntity.scrollProgress ?? 0));
+  const serverScroll = clamp(Number(serverEntity.scrollProgress ?? 0));
   merged.scrollProgress = Math.max(clientScroll, serverScroll);
 
   return coerceDates(merged);

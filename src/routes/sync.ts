@@ -13,12 +13,21 @@ const syncEntitySchema = z.object({
   deletedAt: z.string().nullable().optional(),
 }).passthrough();
 
+// scrollProgress must match the [0, 1] contract enforced by PUT /api/sections/:id —
+// the Max-wins conflict resolver makes any bad value sticky once it lands.
+const syncSectionSchema = z.object({
+  id: z.string(),
+  updatedAt: z.string(),
+  deletedAt: z.string().nullable().optional(),
+  scrollProgress: z.number().min(0).max(1).optional(),
+}).passthrough();
+
 const syncPayloadSchema = z.object({
   lastSyncedAt: z.string(),
   changes: z.object({
     books: z.array(syncEntitySchema).default([]),
     chapters: z.array(syncEntitySchema).default([]),
-    sections: z.array(syncEntitySchema).default([]),
+    sections: z.array(syncSectionSchema).default([]),
     vocabulary: z.array(syncEntitySchema).default([]),
     settings: z.record(z.string(), z.unknown()).nullable().default(null),
     exerciseProgress: z.array(syncEntitySchema).default([]),
