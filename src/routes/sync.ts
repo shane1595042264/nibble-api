@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { syncService } from '../services/sync.service.js';
 import { AppError } from '../lib/errors.js';
+import { VIEW_MODES, READING_MODES, TRACKING_MODES } from './settings.js';
 
 export const syncRoutes = new Hono();
 
@@ -22,6 +23,18 @@ const syncSectionSchema = z.object({
   scrollProgress: z.number().min(0).max(1).optional(),
 }).passthrough();
 
+// Lenient settings: invalid enum/range values are silently dropped via .catch(undefined)
+// so a stale or buggy client can't permanently wedge sync. Unknown keys pass through
+// (passthrough) — the repository only writes columns known to Drizzle.
+const syncSettingsSchema = z.object({
+  autoReadThresholdSeconds: z.coerce.number().int().min(1).max(3600).optional().catch(undefined),
+  defaultViewMode: z.enum(VIEW_MODES).optional().catch(undefined),
+  readingMode: z.enum(READING_MODES).optional().catch(undefined),
+  trackingMode: z.enum(TRACKING_MODES).optional().catch(undefined),
+  targetLanguage: z.string().optional().catch(undefined),
+  keymapOverrides: z.record(z.string(), z.unknown()).optional().catch(undefined),
+}).passthrough();
+
 const syncPayloadSchema = z.object({
   lastSyncedAt: z.string(),
   changes: z.object({
@@ -29,7 +42,7 @@ const syncPayloadSchema = z.object({
     chapters: z.array(syncEntitySchema).default([]),
     sections: z.array(syncSectionSchema).default([]),
     vocabulary: z.array(syncEntitySchema).default([]),
-    settings: z.record(z.string(), z.unknown()).nullable().default(null),
+    settings: syncSettingsSchema.nullable().default(null),
     exerciseProgress: z.array(syncEntitySchema).default([]),
   }),
 });

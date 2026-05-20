@@ -7,14 +7,22 @@ export const settingsRoutes = new Hono();
 
 // ─── Zod schemas ───────────────────────────────────────────────────
 
-const upsertSettingsSchema = z.object({
-  autoReadThresholdSeconds: z.coerce.number().int().optional(),
-  defaultViewMode: z.string().optional(),
-  readingMode: z.string().optional(),
-  trackingMode: z.string().optional(),
+// Enum contracts must match the frontend types in WordByWord/src/lib/services/settings-service.ts.
+// Without these the reader UI silently falls through to wrong branches on a bad value.
+export const VIEW_MODES = ['pdf', 'text', 'side-by-side'] as const;
+export const READING_MODES = ['scroll', 'flip'] as const;
+export const TRACKING_MODES = ['timer', 'endofpage'] as const;
+
+export const settingsPayloadSchema = z.object({
+  autoReadThresholdSeconds: z.coerce.number().int().min(1).max(3600).optional(),
+  defaultViewMode: z.enum(VIEW_MODES).optional(),
+  readingMode: z.enum(READING_MODES).optional(),
+  trackingMode: z.enum(TRACKING_MODES).optional(),
   targetLanguage: z.string().optional(),
   keymapOverrides: z.record(z.string(), z.unknown()).optional(),
 });
+
+const upsertSettingsSchema = settingsPayloadSchema;
 
 // ─── Default settings returned when none exist ─────────────────────
 
