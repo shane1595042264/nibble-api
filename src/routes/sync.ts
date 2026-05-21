@@ -3,8 +3,13 @@ import { z } from 'zod';
 import { syncService } from '../services/sync.service.js';
 import { AppError } from '../lib/errors.js';
 import { VIEW_MODES, READING_MODES, TRACKING_MODES } from './settings.js';
+import { SECTION_TITLE_MAX, SECTION_TYPE_MAX, SECTION_EXTRACTED_TEXT_MAX } from './sections.js';
 
 export const syncRoutes = new Hono();
+
+// ~2MB — matches extractedText. richContent (Mathpix Markdown) is the same shape of payload.
+const SECTION_RICH_CONTENT_MAX = 2_000_000;
+const CHAPTER_TITLE_MAX = 500;
 
 // ─── Zod schemas ────────────────────────────────────────────────────
 
@@ -21,6 +26,20 @@ const syncSectionSchema = z.object({
   updatedAt: z.string(),
   deletedAt: z.string().nullable().optional(),
   scrollProgress: z.number().min(0).max(1).optional(),
+}).passthrough();
+
+// Strict field-bounds schemas applied per-entity in the route. A violation pushes
+// the id into failedEntities (NOT a 400 on the whole payload), so the client
+// re-bumps updatedAt and the rest of the sync still goes through.
+export const chapterBoundsSchema = z.object({
+  title: z.string().max(CHAPTER_TITLE_MAX).optional(),
+}).passthrough();
+
+export const sectionBoundsSchema = z.object({
+  title: z.string().max(SECTION_TITLE_MAX).optional(),
+  sectionType: z.string().max(SECTION_TYPE_MAX).optional(),
+  extractedText: z.string().max(SECTION_EXTRACTED_TEXT_MAX).optional(),
+  richContent: z.string().max(SECTION_RICH_CONTENT_MAX).optional(),
 }).passthrough();
 
 // Lenient settings: invalid enum/range values are silently dropped via .catch(undefined)
@@ -94,6 +113,39 @@ syncRoutes.post('/', async (c) => {
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
   }
-  const result = await syncService.sync(user.id, parsed.data);
-  return c.json(result);
+
+  // Pre-filter chapters/sections against strict field-length bounds. Invalid
+  // entries are dropped from the payload and their ids are surfaced via
+  // failedEntities so the client retries on the next tick (matches the
+  // existing sync contract — see sync.service.ts L155).
+  const preFilterFailed = { chapters: [] as string[], sections: [] as string[] };
+  const filteredChapters = parsed.data.changes.chapters.filter((ch) => {
+    if (chapterBoundsSchema.safeParse(ch).success) return true;
+    preFilterFailed.chapters.push(ch.id);
+    return false;
+  });
+  const filteredSections = parsed.data.changes.sections.filter((sec) => {
+    if (sectionBoundsSchema.safeParse(sec).success) return true;
+    preFilterFailed.sections.push(sec.id);
+    return false;
+  });
+
+  const cleanedPayload = {
+    ...parsed.data,
+    changes: {
+      ...parsed.data.changes,
+      chapters: filteredChapters,
+      sections: filteredSections,
+    },
+  };
+
+  const result = await syncService.sync(user.id, cleanedPayload);
+  return c.json({
+    ...result,
+    failedEntities: {
+      ...result.failedEntities,
+      chapters: [...result.failedEntities.chapters, ...preFilterFailed.chapters],
+      sections: [...result.failedEntities.sections, ...preFilterFailed.sections],
+    },
+  });
 });

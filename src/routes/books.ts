@@ -179,13 +179,15 @@ bookRoutes.delete('/:id', async (c) => {
 });
 
 // PUT /:id/metadata — update catalog metadata (title, author, etc.)
-const updateMetadataSchema = z.object({
-  title: z.string().min(1).optional(),
-  author: z.string().optional(),
-  description: z.string().optional(),
+// title bound matches the structureSchema chapterItem (500); description gets the
+// most headroom because it can carry a paragraph or two.
+export const updateMetadataSchema = z.object({
+  title: z.string().min(1).max(500).optional(),
+  author: z.string().max(500).optional(),
+  description: z.string().max(2000).optional(),
   coverUrl: z.string().url().optional().nullable(),
-  language: z.string().optional(),
-  publisher: z.string().optional(),
+  language: z.string().max(100).optional(),
+  publisher: z.string().max(500).optional(),
   publishYear: z.number().int().optional().nullable(),
 });
 

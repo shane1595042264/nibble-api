@@ -10,14 +10,22 @@ export const sectionRoutes = new Hono();
 
 // ─── Zod schemas ───────────────────────────────────────────────────
 
-const createSectionSchema = z
+// Field-length bounds:
+// - title .max(500) matches chapters.ts and books.ts structureSchema
+// - sectionType .max(100) — a discriminator string, not free text
+// - extractedText .max(2_000_000) — ~2MB, sized for real OCR output with safety margin
+export const SECTION_TITLE_MAX = 500;
+export const SECTION_TYPE_MAX = 100;
+export const SECTION_EXTRACTED_TEXT_MAX = 2_000_000;
+
+export const createSectionSchema = z
   .object({
     bookId: z.string().uuid(),
     chapterId: z.string().uuid(),
-    title: z.string().min(1),
+    title: z.string().min(1).max(SECTION_TITLE_MAX),
     startPage: z.coerce.number().int().positive().optional(),
     endPage: z.coerce.number().int().positive().optional(),
-    sectionType: z.string().optional(),
+    sectionType: z.string().max(SECTION_TYPE_MAX).optional(),
     sortOrder: z.coerce.number().int().optional(),
   })
   .refine(
@@ -28,15 +36,15 @@ const createSectionSchema = z
     { message: 'Section startPage must be <= endPage' },
   );
 
-const updateSectionSchema = z.object({
-  title: z.string().min(1).optional(),
+export const updateSectionSchema = z.object({
+  title: z.string().min(1).max(SECTION_TITLE_MAX).optional(),
   startPage: z.coerce.number().int().positive().optional(),
   endPage: z.coerce.number().int().positive().optional(),
   isRead: z.boolean().optional(),
   scrollProgress: z.number().min(0).max(1).optional(),
   lastPageViewed: z.coerce.number().int().optional(),
-  extractedText: z.string().optional(),
-  sectionType: z.string().optional(),
+  extractedText: z.string().max(SECTION_EXTRACTED_TEXT_MAX).optional(),
+  sectionType: z.string().max(SECTION_TYPE_MAX).optional(),
   sortOrder: z.coerce.number().int().optional(),
 });
 

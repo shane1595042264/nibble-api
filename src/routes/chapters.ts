@@ -8,16 +8,17 @@ export const chapterRoutes = new Hono();
 
 // ─── Zod schemas ───────────────────────────────────────────────────
 
-const createChapterSchema = z.object({
+// Bounds match the smart-split structureSchema in books.ts (title .max(500)).
+export const createChapterSchema = z.object({
   bookId: z.string().uuid(),
-  title: z.string().min(1),
+  title: z.string().min(1).max(500),
   startPage: z.coerce.number().int().optional(),
   endPage: z.coerce.number().int().optional(),
   sortOrder: z.coerce.number().int().optional(),
 });
 
-const updateChapterSchema = z.object({
-  title: z.string().min(1).optional(),
+export const updateChapterSchema = z.object({
+  title: z.string().min(1).max(500).optional(),
   startPage: z.coerce.number().int().optional(),
   endPage: z.coerce.number().int().optional(),
   sortOrder: z.coerce.number().int().optional(),
