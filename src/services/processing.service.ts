@@ -76,7 +76,13 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
         const info = meta?.info as any;
         metadataTitle = info?.Title || 'unknown';
         metadataAuthor = info?.Author || 'unknown';
-      } catch { /* ignore metadata errors */ }
+      } catch (err: any) {
+        await processingLogRepository.append(
+          jobId, 'metadata',
+          `getMetadata() threw: ${err?.message ?? String(err)} — falling back to title="unknown", author="unknown"`,
+          'warn',
+        );
+      }
 
       await processingLogRepository.append(
         jobId, 'metadata',
