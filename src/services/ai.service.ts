@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../lib/config.js';
+import { Errors } from '../lib/errors.js';
 import { SONNET_MODEL, HAIKU_MODEL } from '../lib/ai-models.js';
 
 const anthropic = config.ANTHROPIC_API_KEY
@@ -66,18 +67,21 @@ Respond with a JSON array of PageAnalysis objects.`;
         }],
       });
 
+      const text = response.content[0].type === 'text' ? response.content[0].text : '';
       try {
-        const text = response.content[0].type === 'text' ? response.content[0].text : '';
         const jsonMatch = text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]) as PageAnalysis[];
-          results.push(...parsed);
+        if (!jsonMatch) {
+          console.error(
+            `[ai.service] classifyPages: no JSON array in Claude response for pages ${pageNumbers[0]}-${pageNumbers[pageNumbers.length - 1]}. Raw (first 500ch): ${text.slice(0, 500)}`,
+          );
+          continue;
         }
-      } catch {
-        // If parsing fails, create basic entries
-        for (const pageNum of pageNumbers) {
-          results.push({ page: pageNum, blocks: [{ type: 'body', startLine: 0, endLine: 999, hasMath: false }] });
-        }
+        const parsed = JSON.parse(jsonMatch[0]) as PageAnalysis[];
+        results.push(...parsed);
+      } catch (err) {
+        console.error(
+          `[ai.service] classifyPages: JSON.parse failed for pages ${pageNumbers[0]}-${pageNumbers[pageNumbers.length - 1]}: ${err instanceof Error ? err.message : String(err)}. Raw (first 500ch): ${text.slice(0, 500)}`,
+        );
       }
     }
 
@@ -158,14 +162,20 @@ Respond with a JSON array of PageAnalysis objects.`;
         system: 'You are a math region detector. For each page image, return a JSON array of bounding boxes {page, regions: [{x, y, w, h}]} for mathematical formulas. Respond only with JSON.',
       });
 
+      const text = response.content[0].type === 'text' ? response.content[0].text : '';
       try {
-        const text = response.content[0].type === 'text' ? response.content[0].text : '';
         const jsonMatch = text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          results.push(...JSON.parse(jsonMatch[0]));
+        if (!jsonMatch) {
+          console.error(
+            `[ai.service] getMathBoundingBoxes: no JSON array in Claude response for pages ${batchPageNums.join(',')}. Raw (first 500ch): ${text.slice(0, 500)}`,
+          );
+          continue;
         }
-      } catch {
-        // Skip on parse failure
+        results.push(...JSON.parse(jsonMatch[0]));
+      } catch (err) {
+        console.error(
+          `[ai.service] getMathBoundingBoxes: JSON.parse failed for pages ${batchPageNums.join(',')}: ${err instanceof Error ? err.message : String(err)}. Raw (first 500ch): ${text.slice(0, 500)}`,
+        );
       }
     }
 
@@ -221,11 +231,20 @@ Respond with a JSON array of PageAnalysis objects.`;
     });
 
     const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error(
+        `[ai.service] wordContext: no JSON object in Claude response for word "${word}". Raw (first 500ch): ${text.slice(0, 500)}`,
+      );
+      throw Errors.aiError('AI response was not valid JSON');
+    }
     try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      return jsonMatch ? JSON.parse(jsonMatch[0]) : { definition: text, explanation: '' };
-    } catch {
-      return { definition: text, explanation: '' };
+      return JSON.parse(jsonMatch[0]);
+    } catch (err) {
+      console.error(
+        `[ai.service] wordContext: JSON.parse failed for word "${word}": ${err instanceof Error ? err.message : String(err)}. Raw (first 500ch): ${text.slice(0, 500)}`,
+      );
+      throw Errors.aiError('AI response was not valid JSON');
     }
   },
 
@@ -288,17 +307,25 @@ Respond in this exact JSON format only, no other text:
     });
 
     const text = response.content[0].type === 'text' ? response.content[0].text : '';
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) {
+      console.error(
+        `[ai.service] translateWord: no JSON object in Claude response for word "${word}" (target ${targetLanguage}). Raw (first 500ch): ${text.slice(0, 500)}`,
+      );
+      throw Errors.aiError('AI translation response was not valid JSON');
+    }
     try {
-      const match = text.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error('no json');
       const parsed = JSON.parse(match[0]);
       return {
         pronunciation: parsed.pronunciation ?? '',
         translation: parsed.translation ?? '',
         partOfSpeech: parsed.partOfSpeech ?? '',
       };
-    } catch {
-      return { pronunciation: '', translation: text.slice(0, 50), partOfSpeech: '' };
+    } catch (err) {
+      console.error(
+        `[ai.service] translateWord: JSON.parse failed for word "${word}" (target ${targetLanguage}): ${err instanceof Error ? err.message : String(err)}. Raw (first 500ch): ${text.slice(0, 500)}`,
+      );
+      throw Errors.aiError('AI translation response was not valid JSON');
     }
   },
 
