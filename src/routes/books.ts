@@ -232,6 +232,9 @@ const structureSchema = z.object({
     }
     return true;
   }, { message: 'Chapter page ranges must not overlap' }),
+  // Optional optimistic-lock token. If supplied, server rejects with 409 STALE_BOOK
+  // when the stored books.updatedAt no longer matches — prevents silent cross-tab overwrite.
+  expectedUpdatedAt: z.string().datetime().optional(),
 });
 
 const suggestStructureSchema = z.object({
@@ -248,6 +251,19 @@ bookRoutes.put('/:id/structure', async (c) => {
   const parsed = structureSchema.safeParse(body);
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+
+  // Optimistic-lock check: bail BEFORE the destructive delete/insert transaction if
+  // another writer has touched this book since the client loaded it. expectedUpdatedAt
+  // is optional — older clients keep working (best-effort path).
+  if (parsed.data.expectedUpdatedAt) {
+    const expectedMs = new Date(parsed.data.expectedUpdatedAt).getTime();
+    if (book.updatedAt.getTime() !== expectedMs) {
+      return c.json(
+        { error: 'STALE_BOOK', currentUpdatedAt: book.updatedAt.toISOString() },
+        409,
+      );
+    }
   }
 
   // Validate page numbers are within the book's total page count
