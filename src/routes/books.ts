@@ -275,66 +275,74 @@ bookRoutes.put('/:id/structure', async (c) => {
   const { db } = await import('../db/index.js');
   const { chapters, sections } = await import('../db/schema.js');
   const { eq } = await import('drizzle-orm');
-  const { chapterRepository } = await import('../repositories/chapter.repository.js');
   const { sectionRepository } = await import('../repositories/section.repository.js');
 
   // Save old sections for progress preservation
   const oldSections = await sectionRepository.findByBookId(book.id);
 
-  // Delete existing structure
-  await db.delete(sections).where(eq(sections.bookId, book.id));
-  await db.delete(chapters).where(eq(chapters.bookId, book.id));
+  const { newChapters, newSections } = await db.transaction(async (tx) => {
+    // Delete existing structure
+    await tx.delete(sections).where(eq(sections.bookId, book.id));
+    await tx.delete(chapters).where(eq(chapters.bookId, book.id));
 
-  // Create new structure
-  const newChapters = [];
-  const newSections = [];
-  let sectionOrder = 0;
-
-  for (let ci = 0; ci < parsed.data.chapters.length; ci++) {
-    const ch = parsed.data.chapters[ci];
-
-    const chapter = await chapterRepository.create({
+    // Bulk insert chapters in input order. Postgres preserves order in INSERT ... RETURNING,
+    // so insertedChapters[ci] corresponds to parsed.data.chapters[ci].
+    const chapterRows = parsed.data.chapters.map((ch, ci) => ({
       bookId: book.id,
       title: ch.title,
       startPage: ch.startPage,
       endPage: ch.endPage,
       sortOrder: ci,
-    });
-    newChapters.push(chapter);
+    }));
+    const insertedChapters = chapterRows.length === 0
+      ? []
+      : await tx.insert(chapters).values(chapterRows).returning();
 
-    const chapterSections = ch.sections && ch.sections.length > 0
-      ? ch.sections
-      : [{ title: ch.title, startPage: ch.startPage, endPage: ch.endPage }];
+    // Build all section rows with progress preservation, then bulk insert in one round-trip.
+    const sectionRows: Array<typeof sections.$inferInsert> = [];
+    let sectionOrder = 0;
+    for (let ci = 0; ci < parsed.data.chapters.length; ci++) {
+      const ch = parsed.data.chapters[ci];
+      const insertedChapter = insertedChapters[ci];
+      const chapterSections = ch.sections && ch.sections.length > 0
+        ? ch.sections
+        : [{ title: ch.title, startPage: ch.startPage, endPage: ch.endPage }];
 
-    for (const sec of chapterSections) {
-      // Progress preservation: check if new section overlaps >50% with an old read section
-      let isRead = false;
-      const newRange = sec.endPage - sec.startPage + 1;
-      for (const oldSec of oldSections) {
-        if (!oldSec.isRead || oldSec.startPage == null || oldSec.endPage == null) continue;
-        const overlapStart = Math.max(sec.startPage, oldSec.startPage);
-        const overlapEnd = Math.min(sec.endPage, oldSec.endPage);
-        const overlap = Math.max(0, overlapEnd - overlapStart + 1);
-        if (overlap / newRange > 0.5) {
-          isRead = true;
-          break;
+      for (const sec of chapterSections) {
+        // Progress preservation: check if new section overlaps >50% with an old read section
+        let isRead = false;
+        const newRange = sec.endPage - sec.startPage + 1;
+        for (const oldSec of oldSections) {
+          if (!oldSec.isRead || oldSec.startPage == null || oldSec.endPage == null) continue;
+          const overlapStart = Math.max(sec.startPage, oldSec.startPage);
+          const overlapEnd = Math.min(sec.endPage, oldSec.endPage);
+          const overlap = Math.max(0, overlapEnd - overlapStart + 1);
+          if (overlap / newRange > 0.5) {
+            isRead = true;
+            break;
+          }
         }
-      }
 
-      const section = await sectionRepository.create({
-        bookId: book.id,
-        chapterId: chapter.id,
-        title: sec.title,
-        startPage: sec.startPage,
-        endPage: sec.endPage,
-        sectionType: 'content',
-        sortOrder: ++sectionOrder,
-        isRead,
-        readAt: isRead ? new Date() : undefined,
-      });
-      newSections.push(section);
+        sectionRows.push({
+          bookId: book.id,
+          chapterId: insertedChapter.id,
+          title: sec.title,
+          startPage: sec.startPage,
+          endPage: sec.endPage,
+          sectionType: 'content',
+          sortOrder: ++sectionOrder,
+          isRead,
+          readAt: isRead ? new Date() : null,
+        });
+      }
     }
-  }
+
+    const insertedSections = sectionRows.length === 0
+      ? []
+      : await tx.insert(sections).values(sectionRows).returning();
+
+    return { newChapters: insertedChapters, newSections: insertedSections };
+  });
 
   // Update book structure source
   await bookRepository.update(book.id, { structureSource: 'manual' });
