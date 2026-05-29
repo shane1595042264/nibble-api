@@ -40,12 +40,49 @@ export const billingService = {
       await userRepository.update(user.id, { stripeCustomerId: customerId });
     }
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountCents,
-      currency: 'usd',
-      customer: customerId,
-      metadata: { jobId, userId },
-    });
+    // Reuse an existing reusable PI for this job instead of minting a new one
+    // each call. Prevents double-charge from two tabs, orphan PIs in the Stripe
+    // dashboard, and pending-row growth in processingCharges.
+    const REUSABLE_STATES = new Set<Stripe.PaymentIntent.Status>([
+      'requires_payment_method',
+      'requires_confirmation',
+      'requires_action',
+    ]);
+
+    if (job.stripePaymentIntentId) {
+      try {
+        const prev = await stripe.paymentIntents.retrieve(job.stripePaymentIntentId);
+        if (REUSABLE_STATES.has(prev.status) && prev.amount === amountCents) {
+          return { clientSecret: prev.client_secret!, amountCents };
+        }
+        // Price changed (catalog totalPages drift) or different reusable amount —
+        // cancel the prev PI before minting a new one so it doesn't linger.
+        if (REUSABLE_STATES.has(prev.status)) {
+          await stripe.paymentIntents.cancel(prev.id);
+        }
+        // Any other status (canceled, succeeded, processing, requires_capture):
+        // fall through and mint a fresh PI without canceling — Stripe rejects
+        // cancel on those states.
+      } catch (err) {
+        // PI was deleted out from under us or the id is unknown — mint a new one.
+        if (!(err instanceof Stripe.errors.StripeInvalidRequestError)) throw err;
+      }
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountCents,
+        currency: 'usd',
+        customer: customerId,
+        metadata: { jobId, userId },
+      },
+      {
+        // Collapses network-retry duplicates for the same logical attempt.
+        // Including amountCents in the key means a price change naturally
+        // gets a fresh key without us tracking nonces ourselves.
+        idempotencyKey: `pi-create:${jobId}:${amountCents}`,
+      },
+    );
 
     // Update job with cost and payment intent
     await billingRepository.updateJobStatus(jobId, {
