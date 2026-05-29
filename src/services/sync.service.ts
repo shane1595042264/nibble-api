@@ -261,10 +261,14 @@ export const syncService = {
         if (!server) {
           await chapterRepository.create(coerced as any);
         } else {
+          // Security: server row's parent book must be owned by the authenticated user.
+          // existingBookIdSet was built from books filtered by userId, so this enforces ownership.
+          if (!existingBookIdSet.has(server.bookId)) continue;
           const clientTime = new Date(clientChapter.updatedAt).getTime();
           const serverTime = new Date(server.updatedAt).getTime();
           if (clientTime > serverTime) {
-            const { id, createdAt, updatedAt, ...data } = coerced;
+            // Strip bookId to prevent reparenting an owned chapter under a different book.
+            const { id, bookId, createdAt, updatedAt, ...data } = coerced;
             if (clientChapter.deletedAt) {
               await chapterRepository.softDelete(clientChapter.id);
             } else {
@@ -305,6 +309,9 @@ export const syncService = {
         if (!server) {
           await sectionRepository.create(coerced as any);
         } else {
+          // Security: server row's parent book must be owned by the authenticated user.
+          // Guards both the client-newer write AND the server-newer progressMerge write below.
+          if (!existingBookIdSet.has(server.bookId)) continue;
           const clientTime = new Date(clientSection.updatedAt).getTime();
           const serverTime = new Date(server.updatedAt).getTime();
 
@@ -312,8 +319,9 @@ export const syncService = {
           const progressMerge = resolveConflict(clientSection, server);
 
           if (clientTime > serverTime) {
-            // Client wins on general fields, but merge reading progress
-            const { id, createdAt, updatedAt, ...data } = coerced;
+            // Client wins on general fields, but merge reading progress.
+            // Strip bookId / chapterId to prevent reparenting.
+            const { id, bookId, chapterId, createdAt, updatedAt, ...data } = coerced;
             if (clientSection.deletedAt) {
               await sectionRepository.softDelete(clientSection.id);
             } else {
@@ -378,10 +386,13 @@ export const syncService = {
             userId,
           } as any);
         } else {
+          // Security: skip vocab not owned by the authenticated user (matches books pattern at L224).
+          if (server.userId !== userId) continue;
           const clientTime = new Date(clientWord.updatedAt).getTime();
           const serverTime = new Date(server.updatedAt).getTime();
           if (clientTime > serverTime) {
-            const { id, createdAt, updatedAt, ...data } = coerced;
+            // Strip userId / bookId to prevent reparenting an owned vocab row.
+            const { id, userId: _userId, bookId, createdAt, updatedAt, ...data } = coerced;
             if (clientWord.deletedAt) {
               await vocabularyRepository.softDelete(clientWord.id);
             } else {
