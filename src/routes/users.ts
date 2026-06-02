@@ -11,16 +11,42 @@ export const userRoutes = new Hono();
 const MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2 MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const R2_AVATAR_PREFIX = 'r2:';
+const R2_AVATAR_KEY_PREFIX = 'avatars/';
+const AVATAR_URL_MAX = 500;
 const PASSWORD_BCRYPT_ROUNDS = 12;
 const MIN_PASSWORD_LENGTH = 6;
 const PASSWORD_MAX_FAILURES = 5;
 const PASSWORD_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 
-/** If avatarUrl is an R2 key, resolve it to a fresh presigned URL. */
+/** Expected R2 avatar value the client may submit for itself. */
+export function expectedOwnAvatarUrl(userId: string): string {
+  return `${R2_AVATAR_PREFIX}${R2_AVATAR_KEY_PREFIX}${userId}.webp`;
+}
+
+/**
+ * Reject an avatarUrl that:
+ *  - exceeds the max length, or
+ *  - is r2:-prefixed but does not equal the requesting user's own avatar key.
+ * Returns null when valid; an error message when not.
+ */
+export function validateAvatarUrlForUser(avatarUrl: string, userId: string): string | null {
+  if (avatarUrl.length > AVATAR_URL_MAX) return 'avatarUrl too long';
+  if (avatarUrl.startsWith(R2_AVATAR_PREFIX) && avatarUrl !== expectedOwnAvatarUrl(userId)) {
+    return 'Invalid avatarUrl';
+  }
+  return null;
+}
+
+/**
+ * If avatarUrl is an R2 key, resolve it to a fresh presigned URL.
+ * Defense in depth: only sign keys under avatars/; any other prefix returns null,
+ * even if it slipped past PUT /me validation (stale rows, future code changes).
+ */
 async function resolveAvatarUrl(avatarUrl: string | null): Promise<string | null> {
   if (!avatarUrl) return null;
   if (avatarUrl.startsWith(R2_AVATAR_PREFIX)) {
     const r2Key = avatarUrl.slice(R2_AVATAR_PREFIX.length);
+    if (!r2Key.startsWith(R2_AVATAR_KEY_PREFIX)) return null;
     return storageService.getAvatarUrl(r2Key);
   }
   return avatarUrl;
@@ -55,9 +81,9 @@ userRoutes.get('/me', async (c) => {
 });
 
 // ─── PUT /me ─────────────────────────────────────────────────────
-const updateProfileSchema = z.object({
+export const updateProfileSchema = z.object({
   name: z.string().max(100).optional(),
-  avatarUrl: z.string().optional(),
+  avatarUrl: z.string().max(AVATAR_URL_MAX).optional(),
 });
 
 userRoutes.put('/me', async (c) => {
@@ -66,6 +92,11 @@ userRoutes.put('/me', async (c) => {
   const parsed = updateProfileSchema.safeParse(body);
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
+  }
+
+  if (parsed.data.avatarUrl !== undefined) {
+    const err = validateAvatarUrlForUser(parsed.data.avatarUrl, user.id);
+    if (err) throw new AppError('VALIDATION_ERROR', err, 400);
   }
 
   const data: Record<string, string> = {};
