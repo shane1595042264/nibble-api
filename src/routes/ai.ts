@@ -1,9 +1,20 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { APIUserAbortError } from '@anthropic-ai/sdk';
 import { aiService } from '../services/ai.service.js';
 import { AppError } from '../lib/errors.js';
 
 export const aiRoutes = new Hono();
+
+// Client-disconnect aborts surface as APIUserAbortError from the SDK or a
+// DOMException with name 'AbortError' from the underlying fetch. Both mean
+// the client is gone — short-circuit with 499 (client closed request) so
+// the global error handler doesn't log this as an unhandled 500.
+function isClientAbort(err: unknown): boolean {
+  if (err instanceof APIUserAbortError) return true;
+  if (err instanceof Error && err.name === 'AbortError') return true;
+  return false;
+}
 
 const wordContextSchema = z.object({
   word: z.string().min(1).max(100),
@@ -98,8 +109,18 @@ aiRoutes.post('/translate-word', async (c) => {
   const body = await c.req.json();
   const parsed = translateWordSchema.safeParse(body);
   if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  const result = await aiService.translateWord(parsed.data.word, parsed.data.sentence, parsed.data.targetLanguage);
-  return c.json(result);
+  try {
+    const result = await aiService.translateWord(
+      parsed.data.word,
+      parsed.data.sentence,
+      parsed.data.targetLanguage,
+      { signal: c.req.raw.signal },
+    );
+    return c.json(result);
+  } catch (err) {
+    if (isClientAbort(err)) return new Response(null, { status: 499 });
+    throw err;
+  }
 });
 
 const translateSentenceSchema = z.object({
@@ -112,8 +133,18 @@ aiRoutes.post('/translate-sentence', async (c) => {
   const body = await c.req.json();
   const parsed = translateSentenceSchema.safeParse(body);
   if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  const result = await aiService.translateSentence(parsed.data.sentence, parsed.data.paragraphContext, parsed.data.targetLanguage);
-  return c.json(result);
+  try {
+    const result = await aiService.translateSentence(
+      parsed.data.sentence,
+      parsed.data.paragraphContext,
+      parsed.data.targetLanguage,
+      { signal: c.req.raw.signal },
+    );
+    return c.json(result);
+  } catch (err) {
+    if (isClientAbort(err)) return new Response(null, { status: 499 });
+    throw err;
+  }
 });
 
 const explainTranslationSchema = z.object({
@@ -127,8 +158,19 @@ aiRoutes.post('/explain-translation', async (c) => {
   const body = await c.req.json();
   const parsed = explainTranslationSchema.safeParse(body);
   if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  const result = await aiService.explainTranslation(parsed.data.word, parsed.data.sentence, parsed.data.translation, parsed.data.targetLanguage);
-  return c.json(result);
+  try {
+    const result = await aiService.explainTranslation(
+      parsed.data.word,
+      parsed.data.sentence,
+      parsed.data.translation,
+      parsed.data.targetLanguage,
+      { signal: c.req.raw.signal },
+    );
+    return c.json(result);
+  } catch (err) {
+    if (isClientAbort(err)) return new Response(null, { status: 499 });
+    throw err;
+  }
 });
 
 const explainContentSchema = z.object({
@@ -140,6 +182,15 @@ aiRoutes.post('/explain-content', async (c) => {
   const body = await c.req.json();
   const parsed = explainContentSchema.safeParse(body);
   if (!parsed.success) throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  const result = await aiService.explainContent(parsed.data.content, parsed.data.surroundingContext);
-  return c.json(result);
+  try {
+    const result = await aiService.explainContent(
+      parsed.data.content,
+      parsed.data.surroundingContext,
+      { signal: c.req.raw.signal },
+    );
+    return c.json(result);
+  } catch (err) {
+    if (isClientAbort(err)) return new Response(null, { status: 499 });
+    throw err;
+  }
 });

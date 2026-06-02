@@ -287,6 +287,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     word: string,
     sentence: string,
     targetLanguage: string,
+    options?: { signal?: AbortSignal },
   ): Promise<{ pronunciation: string; translation: string; partOfSpeech: string }> {
     if (!anthropic) throw new Error('Anthropic not configured');
     const prompt = `You are a precise dictionary/translator. Given an English word and the sentence it appears in, provide:
@@ -300,11 +301,14 @@ Sentence: "${sentence}"
 Respond in this exact JSON format only, no other text:
 {"pronunciation": "/.../ ", "translation": "...", "partOfSpeech": "..."}`;
 
-    const response = await anthropic.messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 150,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await anthropic.messages.create(
+      {
+        model: HAIKU_MODEL,
+        max_tokens: 150,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      { signal: options?.signal },
+    );
 
     const text = response.content[0].type === 'text' ? response.content[0].text : '';
     const match = text.match(/\{[\s\S]*\}/);
@@ -333,6 +337,7 @@ Respond in this exact JSON format only, no other text:
     sentence: string,
     paragraphContext: string,
     targetLanguage: string,
+    options?: { signal?: AbortSignal },
   ): Promise<{ translation: string }> {
     if (!anthropic) throw new Error('Anthropic not configured');
     const prompt = `Translate the following English sentence into ${targetLanguage}. Use the surrounding paragraph for context to ensure accuracy. Return ONLY the translated sentence, nothing else.
@@ -341,11 +346,14 @@ Sentence: "${sentence}"
 
 Paragraph context: "${paragraphContext}"`;
 
-    const response = await anthropic.messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 300,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await anthropic.messages.create(
+      {
+        model: HAIKU_MODEL,
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      { signal: options?.signal },
+    );
     const text = response.content[0].type === 'text' ? response.content[0].text : '';
     return { translation: text.trim().replace(/^["']|["']$/g, '') };
   },
@@ -355,21 +363,26 @@ Paragraph context: "${paragraphContext}"`;
     sentence: string,
     translation: string,
     targetLanguage: string,
+    options?: { signal?: AbortSignal },
   ): Promise<{ explanation: string }> {
     if (!anthropic) throw new Error('Anthropic not configured');
     const prompt = `Explain briefly (under 100 words) why the English word "${word}" is translated as "${translation}" in ${targetLanguage}, given the sentence: "${sentence}". Focus on how the sentence context determines this specific meaning. Be concise and direct.`;
 
-    const response = await anthropic.messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 200,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await anthropic.messages.create(
+      {
+        model: HAIKU_MODEL,
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      { signal: options?.signal },
+    );
     return { explanation: response.content[0].type === 'text' ? response.content[0].text : '' };
   },
 
   async explainContent(
     content: string,
     surroundingContext: string,
+    options?: { signal?: AbortSignal },
   ): Promise<{ explanation: string }> {
     if (!anthropic) throw new Error('Anthropic not configured');
     const prompt = `Explain the following content clearly and concisely. What does it mean, what is it showing, and how does it relate to the surrounding context?
@@ -382,11 +395,14 @@ ${surroundingContext}
 
 Give a clear explanation in English. If it's a table, explain what the data represents. If it's code, explain the algorithm. If it's a formula, explain what each variable means. Be thorough but concise.`;
 
-    const response = await anthropic.messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 500,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await anthropic.messages.create(
+      {
+        model: HAIKU_MODEL,
+        max_tokens: 500,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      { signal: options?.signal },
+    );
     return { explanation: response.content[0].type === 'text' ? response.content[0].text : '' };
   },
 };
