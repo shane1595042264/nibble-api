@@ -70,6 +70,26 @@ export const processingLogRepository = {
     return job ?? null;
   },
 
+  /**
+   * Atomically claim a failed job for retry by transitioning it to 'superseded'.
+   * Returns the row on a successful claim, null if another caller already won
+   * the race or the job is not in 'failed' state for this user.
+   */
+  async claimFailedForRetry(jobId: string, userId: string) {
+    const [claimed] = await db
+      .update(processingJobs)
+      .set({ status: 'superseded' })
+      .where(
+        and(
+          eq(processingJobs.id, jobId),
+          eq(processingJobs.userId, userId),
+          eq(processingJobs.status, 'failed'),
+        ),
+      )
+      .returning();
+    return claimed ?? null;
+  },
+
   /** Find an active (pending or processing) job for a given file hash. */
   async findActiveJobByFileHash(fileHash: string) {
     const [job] = await db

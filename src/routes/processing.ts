@@ -87,18 +87,28 @@ processingRoutes.post('/:jobId/retry', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
 
-  const job = await processingLogRepository.getJob(jobId);
-  if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
-
-  if (job.status !== 'failed') {
+  // Atomic claim: only one concurrent /retry for this jobId wins. Flipping the
+  // source row out of 'failed' is the canonical mutex — re-reads tell us why
+  // we lost (missing/unowned vs already retried).
+  const claimed = await processingLogRepository.claimFailedForRetry(jobId, user.id);
+  if (!claimed) {
+    const existing = await processingLogRepository.getJob(jobId);
+    if (!existing || existing.userId !== user.id) throw Errors.notFound('Processing job');
+    if (existing.status === 'failed') {
+      // Shouldn't happen: claim returned null but row is still 'failed'.
+      return c.json({ error: 'Could not claim job for retry' }, 409);
+    }
+    if (existing.status === 'superseded') {
+      return c.json({ error: 'Job already retried' }, 409);
+    }
     return c.json({ error: 'Only failed jobs can be retried' }, 400);
   }
 
-  if (!job.bookId) {
+  if (!claimed.bookId) {
     return c.json({ error: 'No book associated with this job' }, 400);
   }
 
-  const book = await bookRepository.findById(job.bookId);
+  const book = await bookRepository.findById(claimed.bookId);
   if (!book) throw Errors.notFound('Book');
 
   // Wrap deletes + insert in a transaction to prevent data loss if any step fails
@@ -109,7 +119,7 @@ processingRoutes.post('/:jobId/retry', async (c) => {
 
     // Create a new processing job
     const [createdJob] = await tx.insert(processingJobs).values({
-      fileHash: job.fileHash,
+      fileHash: claimed.fileHash,
       userId: user.id,
       bookId: book.id,
       status: 'pending',
@@ -124,7 +134,7 @@ processingRoutes.post('/:jobId/retry', async (c) => {
   setTimeout(async () => {
     try {
       const { processingService } = await import('../services/processing.service.js');
-      await processingService.orchestratePipeline(newJob.id, job.fileHash, book.id);
+      await processingService.orchestratePipeline(newJob.id, claimed.fileHash, book.id);
     } catch (err: any) {
       console.error('Retry processing pipeline failed:', err);
       const errorMessage = err?.message ?? 'Unknown error';

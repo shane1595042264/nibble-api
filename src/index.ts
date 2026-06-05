@@ -73,7 +73,7 @@ app.use('/vocabulary/*', authMiddleware, rateLimiter(60));
 app.use('/settings/*', authMiddleware, rateLimiter(30));
 app.use('/sync/*', authMiddleware, rateLimiter(30));
 app.use('/ai/*', authMiddleware, rateLimiter(60), aiAccessMiddleware);
-app.use('/processing/*', authMiddleware);
+app.use('/processing/*', authMiddleware, rateLimiter(30));
 app.use('/billing/*', authMiddleware, rateLimiter(10, 60_000));
 app.use('/users/me/avatar', authMiddleware, rateLimiter(5, 3600000));
 app.use('/users/*', authMiddleware);
