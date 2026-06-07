@@ -60,8 +60,13 @@ aiRoutes.post('/ocr', async (c) => {
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
   }
-  const texts = await aiService.ocrPages(parsed.data.images);
-  return c.json({ texts });
+  try {
+    const texts = await aiService.ocrPages(parsed.data.images, { signal: c.req.raw.signal });
+    return c.json({ texts });
+  } catch (err) {
+    if (isClientAbort(err)) return new Response(null, { status: 499 });
+    throw err;
+  }
 });
 
 aiRoutes.post('/word-context', async (c) => {

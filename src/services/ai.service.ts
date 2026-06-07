@@ -183,35 +183,47 @@ Respond with a JSON array of PageAnalysis objects.`;
   },
 
   // Vision OCR — extract text from a page image
-  async ocrPageImage(base64Image: string): Promise<string> {
+  async ocrPageImage(
+    base64Image: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<string> {
     if (!anthropic) throw new Error('Anthropic not configured');
 
-    const response = await anthropic.messages.create({
-      model: SONNET_MODEL,
-      max_tokens: 4096,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/png', data: base64Image },
-          },
-          {
-            type: 'text',
-            text: 'Extract ALL text from this page image. Preserve paragraph structure. For mathematical formulas, use LaTeX notation wrapped in $...$ for inline or $$...$$ for display math. Return ONLY the extracted text, nothing else.',
-          },
-        ],
-      }],
-    });
+    const response = await anthropic.messages.create(
+      {
+        model: SONNET_MODEL,
+        max_tokens: 4096,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: base64Image },
+            },
+            {
+              type: 'text',
+              text: 'Extract ALL text from this page image. Preserve paragraph structure. For mathematical formulas, use LaTeX notation wrapped in $...$ for inline or $$...$$ for display math. Return ONLY the extracted text, nothing else.',
+            },
+          ],
+        }],
+      },
+      { signal: options?.signal },
+    );
 
     return response.content[0].type === 'text' ? response.content[0].text : '';
   },
 
   // Batch OCR — multiple pages at once
-  async ocrPages(base64Images: string[]): Promise<string[]> {
+  async ocrPages(
+    base64Images: string[],
+    options?: { signal?: AbortSignal },
+  ): Promise<string[]> {
     const results: string[] = [];
     for (const img of base64Images) {
-      const text = await this.ocrPageImage(img);
+      // Stop the queue between iterations if the client already disconnected,
+      // so a 12-page batch doesn't bill 11 wasted Sonnet calls after abort.
+      if (options?.signal?.aborted) break;
+      const text = await this.ocrPageImage(img, { signal: options?.signal });
       results.push(text);
     }
     return results;
