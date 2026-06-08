@@ -9,7 +9,7 @@ import { db } from '../db/index.js';
 import { nibCache, processingJobs, sections, chapters } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
-import { Errors } from '../lib/errors.js';
+import { AppError, Errors } from '../lib/errors.js';
 import { hasFreeAiAccess } from '../lib/billing-access.js';
 
 export const processingRoutes = new Hono();
@@ -180,8 +180,12 @@ processingRoutes.get('/:jobId/logs', async (c) => {
   const job = await processingLogRepository.getJob(jobId);
   if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
 
-  const sinceParam = c.req.query('since');
-  const since = sinceParam ? new Date(sinceParam) : undefined;
+  const sinceSchema = z.string().datetime().optional();
+  const parsed = sinceSchema.safeParse(c.req.query('since'));
+  if (!parsed.success) {
+    throw new AppError('VALIDATION_ERROR', 'since must be an ISO 8601 datetime', 400);
+  }
+  const since = parsed.data ? new Date(parsed.data) : undefined;
 
   const logs = await processingLogRepository.getByJobId(jobId, since);
   return c.json({ logs });
