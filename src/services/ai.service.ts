@@ -229,67 +229,6 @@ Respond with a JSON array of PageAnalysis objects.`;
     return results;
   },
 
-  // AI proxy methods
-  async wordContext(word: string, sentence: string, bookContext?: string): Promise<{ definition: string; translation?: string; explanation: string }> {
-    if (!anthropic) throw new Error('Anthropic not configured');
-
-    const response = await anthropic.messages.create({
-      model: SONNET_MODEL,
-      max_tokens: 500,
-      messages: [{
-        role: 'user',
-        content: `Given the word "${word}" in the sentence: "${sentence}"${bookContext ? ` (from: ${bookContext})` : ''}\n\nProvide:\n1. A clear definition in context\n2. A brief explanation of how it's used here\n\nRespond as JSON: { "definition": "...", "explanation": "..." }`,
-      }],
-    });
-
-    const text = response.content[0].type === 'text' ? response.content[0].text : '{}';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error(
-        `[ai.service] wordContext: no JSON object in Claude response for word "${word}". Raw (first 500ch): ${text.slice(0, 500)}`,
-      );
-      throw Errors.aiError('AI response was not valid JSON');
-    }
-    try {
-      return JSON.parse(jsonMatch[0]);
-    } catch (err) {
-      console.error(
-        `[ai.service] wordContext: JSON.parse failed for word "${word}": ${err instanceof Error ? err.message : String(err)}. Raw (first 500ch): ${text.slice(0, 500)}`,
-      );
-      throw Errors.aiError('AI response was not valid JSON');
-    }
-  },
-
-  async translate(text: string, targetLanguage: string): Promise<string> {
-    if (!anthropic) throw new Error('Anthropic not configured');
-
-    const response = await anthropic.messages.create({
-      model: SONNET_MODEL,
-      max_tokens: 1000,
-      messages: [{
-        role: 'user',
-        content: `Translate the following text to ${targetLanguage}. Return only the translation, nothing else.\n\n${text}`,
-      }],
-    });
-
-    return response.content[0].type === 'text' ? response.content[0].text : '';
-  },
-
-  async explain(text: string, bookContext?: string): Promise<string> {
-    if (!anthropic) throw new Error('Anthropic not configured');
-
-    const response = await anthropic.messages.create({
-      model: SONNET_MODEL,
-      max_tokens: 1000,
-      messages: [{
-        role: 'user',
-        content: `Explain the following text in simple terms${bookContext ? ` (context: ${bookContext})` : ''}:\n\n${text}`,
-      }],
-    });
-
-    return response.content[0].type === 'text' ? response.content[0].text : '';
-  },
-
   // ─── Reader-side translation / explanation endpoints ─────────────
   // These match the prompts that used to live in the frontend's
   // translation-service.ts, so the client no longer needs its own

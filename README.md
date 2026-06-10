@@ -127,9 +127,11 @@ All routes except `/api/health` and `/api/billing/webhook` require `Authorizatio
 | GET/POST/PUT/DELETE | `/api/sections/*` | Yes | Section CRUD |
 | GET/POST/PUT/DELETE | `/api/vocabulary/*` | Yes | Vocabulary CRUD |
 | GET/PUT | `/api/settings` | Yes | User settings |
-| POST | `/api/ai/word-context` | Yes | AI word lookup |
-| POST | `/api/ai/translate` | Yes | AI translation |
-| POST | `/api/ai/explain` | Yes | AI explanation |
+| POST | `/api/ai/ocr` | Yes | Vision OCR for page images |
+| POST | `/api/ai/translate-word` | Yes | Reader word translation |
+| POST | `/api/ai/translate-sentence` | Yes | Reader sentence translation |
+| POST | `/api/ai/explain-translation` | Yes | Explain a word translation |
+| POST | `/api/ai/explain-content` | Yes | Explain selected content |
 | POST | `/api/processing/start` | Yes | Start AI processing |
 | GET | `/api/processing/:jobId` | Yes | Processing status |
 | POST | `/api/billing/create-payment` | Yes | Stripe payment |

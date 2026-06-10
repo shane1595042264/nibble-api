@@ -8,6 +8,14 @@
 
 The plan below was written 2026-03-10 as the initial build-out. Most of it shipped. This section overrides anything below it when they conflict. Add a dated bullet here whenever the user's intent changes — do NOT silently delete the older sections; just note they're superseded.
 
+### 2026-06-10 — Legacy AI proxy routes removed (KAN-210)
+
+The three original AI proxy routes — `POST /api/ai/word-context`, `POST /api/ai/translate`, `POST /api/ai/explain` — have been deleted from `src/routes/ai.ts` along with their service methods (`wordContext`, `translate`, `explain`) in `src/services/ai.service.ts`. They had no callers in either repo, lacked the `c.req.raw.signal` + `isClientAbort()` handling every sibling route now has, and represented an authenticated cost-burn surface with no abort path.
+
+The reader-side endpoints that superseded them are still live: `/ai/translate-word`, `/ai/translate-sentence`, `/ai/explain-translation`, `/ai/explain-content` (registered in `src/routes/ai.ts`, with matching service methods).
+
+The historical references to the deleted routes at line 58 (File Map), line 2130 (build commit message in the original plan), and lines 2253-2255 (original API table) are left in place as historical context per this section's rule.
+
 ### 2026-05-16 — Vocab is no longer stored locally; forwarded to shanejli's knowledge base
 
 The nibble-api `vocabulary` table is no longer the source of truth for vocab. The personal-website knowledge base at https://shanebackend-production.up.railway.app/api/knowledge/notes is.

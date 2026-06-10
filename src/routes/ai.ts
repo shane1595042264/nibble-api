@@ -16,22 +16,6 @@ function isClientAbort(err: unknown): boolean {
   return false;
 }
 
-const wordContextSchema = z.object({
-  word: z.string().min(1).max(100),
-  sentence: z.string().min(1).max(2000),
-  bookContext: z.string().max(5000).optional(),
-});
-
-const translateSchema = z.object({
-  text: z.string().min(1).max(5000),
-  targetLanguage: z.string().min(1).max(50),
-});
-
-const explainSchema = z.object({
-  text: z.string().min(1).max(5000),
-  bookContext: z.string().max(5000).optional(),
-});
-
 // OCR — extract text from page images using Claude Vision
 // Bounds protect against memory/cost DoS: a single authenticated request
 // could otherwise pin the event loop and burn the Anthropic budget on
@@ -67,39 +51,6 @@ aiRoutes.post('/ocr', async (c) => {
     if (isClientAbort(err)) return new Response(null, { status: 499 });
     throw err;
   }
-});
-
-aiRoutes.post('/word-context', async (c) => {
-  const body = await c.req.json();
-  const parsed = wordContextSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  }
-  const { word, sentence, bookContext } = parsed.data;
-  const result = await aiService.wordContext(word, sentence, bookContext);
-  return c.json(result);
-});
-
-aiRoutes.post('/translate', async (c) => {
-  const body = await c.req.json();
-  const parsed = translateSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  }
-  const { text, targetLanguage } = parsed.data;
-  const translation = await aiService.translate(text, targetLanguage);
-  return c.json({ translation });
-});
-
-aiRoutes.post('/explain', async (c) => {
-  const body = await c.req.json();
-  const parsed = explainSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new AppError('VALIDATION_ERROR', 'Invalid request body', 400);
-  }
-  const { text, bookContext } = parsed.data;
-  const explanation = await aiService.explain(text, bookContext);
-  return c.json({ explanation });
 });
 
 // ─── Reader-side translation (replaces client-side Anthropic calls) ──
