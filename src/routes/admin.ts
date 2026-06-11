@@ -11,6 +11,7 @@ import { Errors } from '../lib/errors.js';
 export const adminRoutes = new Hono();
 
 const uuidParamSchema = z.string().uuid('Invalid UUID format');
+const jobStatusSchema = z.enum(['pending', 'processing', 'completed', 'failed']).optional();
 
 const catalogPaginationSchema = z.object({
   page: z.coerce.number().int().min(1).max(10000).default(1),
@@ -47,7 +48,7 @@ adminRoutes.get('/users', async (c) => {
 
 // Update user role
 adminRoutes.put('/users/:id/role', async (c) => {
-  const userId = c.req.param('id');
+  const userId = uuidParamSchema.parse(c.req.param('id'));
   const body = await c.req.json();
   const { role } = z.object({ role: z.enum(['admin', 'user']) }).parse(body);
 
@@ -128,7 +129,7 @@ adminRoutes.post('/catalog/:id/add-to-shelf', async (c) => {
 
 // List processing jobs
 adminRoutes.get('/jobs', async (c) => {
-  const status = c.req.query('status');
+  const status = jobStatusSchema.parse(c.req.query('status') || undefined);
 
   let jobs;
   if (status) {
