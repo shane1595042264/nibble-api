@@ -9,8 +9,19 @@ async function processNextJob() {
   running = true;
 
   try {
-    // Retry stuck jobs
-    await jobQueue.retryStuckJobs();
+    // Retry stuck jobs (auto-fails any that exceeded the retry window — refund those that had a charge)
+    const autoFailed = await jobQueue.retryStuckJobs();
+    for (const failed of autoFailed) {
+      console.log(`Job ${failed.id} auto-failed after exceeding retry window`);
+      if (failed.stripePaymentIntentId) {
+        try {
+          await billingService.refund(failed.stripePaymentIntentId);
+          console.log(`Refunded auto-failed job ${failed.id}`);
+        } catch (refundError) {
+          console.error(`Refund failed for auto-failed job ${failed.id}:`, refundError);
+        }
+      }
+    }
 
     // Poll for next job
     const jobs = await jobQueue.pollForJobs();
