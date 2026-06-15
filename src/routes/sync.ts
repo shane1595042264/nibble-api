@@ -31,16 +31,41 @@ const syncSectionSchema = z.object({
 // Strict field-bounds schemas applied per-entity in the route. A violation pushes
 // the id into failedEntities (NOT a 400 on the whole payload), so the client
 // re-bumps updatedAt and the rest of the sync still goes through.
-export const chapterBoundsSchema = z.object({
-  title: z.string().max(CHAPTER_TITLE_MAX).optional(),
-}).passthrough();
+// Page ranges mirror the REST contract in chapters.ts / sections.ts: positive
+// ints and startPage <= endPage. .passthrough() is kept so unknown forward-compat
+// fields still flow; .refine sits after passthrough to gate the cross-field rule.
+export const chapterBoundsSchema = z
+  .object({
+    title: z.string().max(CHAPTER_TITLE_MAX).optional(),
+    startPage: z.coerce.number().int().positive().optional(),
+    endPage: z.coerce.number().int().positive().optional(),
+  })
+  .passthrough()
+  .refine(
+    (data) =>
+      data.startPage === undefined ||
+      data.endPage === undefined ||
+      data.startPage <= data.endPage,
+    { message: 'Chapter startPage must be <= endPage' },
+  );
 
-export const sectionBoundsSchema = z.object({
-  title: z.string().max(SECTION_TITLE_MAX).optional(),
-  sectionType: z.string().max(SECTION_TYPE_MAX).optional(),
-  extractedText: z.string().max(SECTION_EXTRACTED_TEXT_MAX).optional(),
-  richContent: z.string().max(SECTION_RICH_CONTENT_MAX).optional(),
-}).passthrough();
+export const sectionBoundsSchema = z
+  .object({
+    title: z.string().max(SECTION_TITLE_MAX).optional(),
+    sectionType: z.string().max(SECTION_TYPE_MAX).optional(),
+    extractedText: z.string().max(SECTION_EXTRACTED_TEXT_MAX).optional(),
+    richContent: z.string().max(SECTION_RICH_CONTENT_MAX).optional(),
+    startPage: z.coerce.number().int().positive().optional(),
+    endPage: z.coerce.number().int().positive().optional(),
+  })
+  .passthrough()
+  .refine(
+    (data) =>
+      data.startPage === undefined ||
+      data.endPage === undefined ||
+      data.startPage <= data.endPage,
+    { message: 'Section startPage must be <= endPage' },
+  );
 
 // Lenient settings: invalid enum/range values are silently dropped via .catch(undefined)
 // so a stale or buggy client can't permanently wedge sync. Unknown keys pass through

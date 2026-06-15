@@ -32,6 +32,78 @@ describe('chapters schemas', () => {
   it('updateChapterSchema accepts no fields (all optional)', () => {
     expect(updateChapterSchema.safeParse({}).success).toBe(true);
   });
+
+  it('createChapterSchema accepts a valid positive range', () => {
+    const r = createChapterSchema.safeParse({
+      bookId: validBookId,
+      title: 'ok',
+      startPage: 1,
+      endPage: 10,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('createChapterSchema rejects startPage = 0', () => {
+    const r = createChapterSchema.safeParse({
+      bookId: validBookId,
+      title: 'ok',
+      startPage: 0,
+      endPage: 5,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('createChapterSchema rejects negative startPage', () => {
+    const r = createChapterSchema.safeParse({
+      bookId: validBookId,
+      title: 'ok',
+      startPage: -10,
+      endPage: 5,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('createChapterSchema rejects negative endPage', () => {
+    const r = createChapterSchema.safeParse({
+      bookId: validBookId,
+      title: 'ok',
+      startPage: 1,
+      endPage: -1,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('createChapterSchema rejects startPage > endPage', () => {
+    const r = createChapterSchema.safeParse({
+      bookId: validBookId,
+      title: 'ok',
+      startPage: 50,
+      endPage: 1,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('createChapterSchema accepts only startPage (endPage undefined)', () => {
+    const r = createChapterSchema.safeParse({
+      bookId: validBookId,
+      title: 'ok',
+      startPage: 1,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('updateChapterSchema rejects startPage = 0', () => {
+    expect(updateChapterSchema.safeParse({ startPage: 0 }).success).toBe(false);
+  });
+
+  it('updateChapterSchema rejects negative endPage', () => {
+    expect(updateChapterSchema.safeParse({ endPage: -3 }).success).toBe(false);
+  });
+
+  it('updateChapterSchema accepts only one positive page field', () => {
+    expect(updateChapterSchema.safeParse({ startPage: 5 }).success).toBe(true);
+    expect(updateChapterSchema.safeParse({ endPage: 5 }).success).toBe(true);
+  });
 });
 
 describe('sections schemas', () => {
@@ -154,6 +226,95 @@ describe('sync route bounds schemas (per-entity pre-filter)', () => {
       expect((r.data as any).bookId).toBe('b');
       expect((r.data as any).isRead).toBe(true);
     }
+  });
+
+  it('chapterBoundsSchema accepts a valid positive range', () => {
+    const r = chapterBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 1,
+      endPage: 10,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('chapterBoundsSchema rejects startPage = 0', () => {
+    const r = chapterBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 0,
+      endPage: 5,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('chapterBoundsSchema rejects negative startPage', () => {
+    const r = chapterBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: -1,
+      endPage: 5,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('chapterBoundsSchema rejects startPage > endPage', () => {
+    const r = chapterBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 50,
+      endPage: 1,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('chapterBoundsSchema accepts payload with no page fields (title-only legacy)', () => {
+    const r = chapterBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      title: 'a chapter',
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('sectionBoundsSchema accepts a valid positive range', () => {
+    const r = sectionBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 1,
+      endPage: 10,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('sectionBoundsSchema rejects startPage = 0', () => {
+    const r = sectionBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 0,
+      endPage: 5,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('sectionBoundsSchema rejects negative endPage', () => {
+    const r = sectionBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 1,
+      endPage: -1,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('sectionBoundsSchema rejects startPage > endPage', () => {
+    const r = sectionBoundsSchema.safeParse({
+      id: 'x',
+      updatedAt: 'now',
+      startPage: 99,
+      endPage: 2,
+    });
+    expect(r.success).toBe(false);
   });
 });
 
