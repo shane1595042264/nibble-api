@@ -1,4 +1,7 @@
 import { bookRepository } from '../repositories/book.repository.js';
+import { chapterRepository } from '../repositories/chapter.repository.js';
+import { sectionRepository } from '../repositories/section.repository.js';
+import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
 import { processingJobs, pdfFiles, sections as sectionsTable, chapters as chaptersTable } from '../db/schema.js';
@@ -45,6 +48,13 @@ export const bookService = {
 
   async deleteBook(id: string, userId: string) {
     const book = await this.getBook(id, userId);
+    // Cascade soft-delete: chapters, sections, vocabulary for this book.
+    // The WHERE deletedAt IS NULL guard inside each helper keeps re-runs idempotent.
+    // Soft-deleted vocab rows flow back to clients as tombstones via the existing
+    // findModifiedSince path, so every device cleans up its local vocab on next sync.
+    await chapterRepository.softDeleteByBookId(book.id);
+    await sectionRepository.softDeleteByBookId(book.id);
+    await vocabularyRepository.softDeleteByBookId(book.id);
     await bookRepository.softDelete(book.id);
     return { deleted: true };
   },

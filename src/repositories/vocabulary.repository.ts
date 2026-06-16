@@ -91,6 +91,13 @@ export const vocabularyRepository = {
     return deleted ?? null;
   },
 
+  async softDeleteByBookId(bookId: string) {
+    await db
+      .update(vocabulary)
+      .set({ deletedAt: new Date() })
+      .where(and(eq(vocabulary.bookId, bookId), isNull(vocabulary.deletedAt)));
+  },
+
   async countByUserId(userId: string): Promise<number> {
     const [result] = await db
       .select({ value: count() })

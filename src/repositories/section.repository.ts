@@ -103,6 +103,13 @@ export const sectionRepository = {
     return deleted ?? null;
   },
 
+  async softDeleteByBookId(bookId: string) {
+    await db
+      .update(sections)
+      .set({ deletedAt: new Date() })
+      .where(and(eq(sections.bookId, bookId), isNull(sections.deletedAt)));
+  },
+
   async markAsRead(id: string) {
     const [updated] = await db
       .update(sections)

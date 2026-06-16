@@ -73,6 +73,13 @@ export const chapterRepository = {
     return deleted ?? null;
   },
 
+  async softDeleteByBookId(bookId: string) {
+    await db
+      .update(chapters)
+      .set({ deletedAt: new Date() })
+      .where(and(eq(chapters.bookId, bookId), isNull(chapters.deletedAt)));
+  },
+
   async countByBookIds(bookIds: string[]): Promise<Map<string, number>> {
     if (bookIds.length === 0) return new Map();
     const rows = await db
