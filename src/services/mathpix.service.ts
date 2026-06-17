@@ -7,6 +7,15 @@ export interface MathRegion {
   bbox: { x: number; y: number; w: number; h: number };
 }
 
+const IMAGE_OCR_TIMEOUT_MS = 60_000;
+const PDF_UPLOAD_TIMEOUT_MS = 120_000;
+const PDF_STATUS_TIMEOUT_MS = 15_000;
+const PDF_DOWNLOAD_TIMEOUT_MS = 60_000;
+
+function isAbortTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+}
+
 export const mathpixService = {
   isConfigured(): boolean {
     return !!(config.MATHPIX_APP_ID && config.MATHPIX_APP_KEY);
@@ -29,6 +38,7 @@ export const mathpixService = {
         formats: ['latex_simplified'],
         data_options: { include_latex: true },
       }),
+      signal: AbortSignal.timeout(IMAGE_OCR_TIMEOUT_MS),
     });
 
     if (!res.ok) throw new Error(`Mathpix error: ${res.status}`);
@@ -62,6 +72,7 @@ export const mathpixService = {
         'app_key': config.MATHPIX_APP_KEY,
       },
       body: formData,
+      signal: AbortSignal.timeout(PDF_UPLOAD_TIMEOUT_MS),
     });
 
     if (!uploadRes.ok) {
@@ -75,16 +86,24 @@ export const mathpixService = {
     let attempts = 0;
     while (attempts < 60) {
       await new Promise(resolve => setTimeout(resolve, 2000));
-      const statusRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}`, {
-        headers: {
-          'app_id': config.MATHPIX_APP_ID,
-          'app_key': config.MATHPIX_APP_KEY,
-        },
-      });
-      if (!statusRes.ok) throw new Error(`Mathpix status error ${statusRes.status}`);
-      const status = await statusRes.json();
-      if (status.status === 'completed') break;
-      if (status.status === 'error') throw new Error(`Mathpix processing error: ${status.error}`);
+      try {
+        const statusRes = await fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}`, {
+          headers: {
+            'app_id': config.MATHPIX_APP_ID,
+            'app_key': config.MATHPIX_APP_KEY,
+          },
+          signal: AbortSignal.timeout(PDF_STATUS_TIMEOUT_MS),
+        });
+        if (!statusRes.ok) throw new Error(`Mathpix status error ${statusRes.status}`);
+        const status = await statusRes.json();
+        if (status.status === 'completed') break;
+        if (status.status === 'error') throw new Error(`Mathpix processing error: ${status.error}`);
+      } catch (err) {
+        // A hung individual poll should not unwind the whole loop — count it as
+        // a failed attempt and let the next iteration retry. Genuine errors
+        // (HTTP non-2xx, processing 'error' status) still bubble up.
+        if (!isAbortTimeout(err)) throw err;
+      }
       attempts++;
     }
 
@@ -94,9 +113,11 @@ export const mathpixService = {
     const [linesRes, mdRes] = await Promise.all([
       fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.lines.json`, {
         headers: { 'app_id': config.MATHPIX_APP_ID, 'app_key': config.MATHPIX_APP_KEY },
+        signal: AbortSignal.timeout(PDF_DOWNLOAD_TIMEOUT_MS),
       }),
       fetch(`https://api.mathpix.com/v3/pdf/${pdf_id}.md`, {
         headers: { 'app_id': config.MATHPIX_APP_ID, 'app_key': config.MATHPIX_APP_KEY },
+        signal: AbortSignal.timeout(PDF_DOWNLOAD_TIMEOUT_MS),
       }),
     ]);
 
@@ -214,6 +235,7 @@ export const mathpixService = {
         },
         enable_tables_fallback: true,
       }),
+      signal: AbortSignal.timeout(IMAGE_OCR_TIMEOUT_MS),
     });
 
     if (!res.ok) {
