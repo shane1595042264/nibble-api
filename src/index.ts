@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { secureHeaders } from 'hono/secure-headers';
 import { serve } from '@hono/node-server';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import Stripe from 'stripe';
@@ -33,6 +34,7 @@ console.log('Migrations complete.');
 const app = new Hono().basePath('/api');
 
 // Global middleware
+app.use('*', secureHeaders());
 app.use('*', corsMiddleware);
 app.onError(errorHandler);
 
