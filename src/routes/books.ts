@@ -290,16 +290,17 @@ bookRoutes.put('/:id/structure', async (c) => {
 
   const { db } = await import('../db/index.js');
   const { chapters, sections } = await import('../db/schema.js');
-  const { eq } = await import('drizzle-orm');
   const { sectionRepository } = await import('../repositories/section.repository.js');
+  const { chapterRepository } = await import('../repositories/chapter.repository.js');
 
   // Save old sections for progress preservation
   const oldSections = await sectionRepository.findByBookId(book.id);
 
   const { newChapters, newSections } = await db.transaction(async (tx) => {
-    // Delete existing structure
-    await tx.delete(sections).where(eq(sections.bookId, book.id));
-    await tx.delete(chapters).where(eq(chapters.bookId, book.id));
+    // Soft-delete existing structure so sync ships deletedAt tombstones to other devices
+    // and they don't resurrect the old layout on their next push (KAN-229).
+    await sectionRepository.softDeleteByBookId(book.id, tx);
+    await chapterRepository.softDeleteByBookId(book.id, tx);
 
     // Bulk insert chapters in input order. Postgres preserves order in INSERT ... RETURNING,
     // so insertedChapters[ci] corresponds to parsed.data.chapters[ci].
