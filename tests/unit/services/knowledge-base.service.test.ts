@@ -161,7 +161,7 @@ describe('forwardVocabToKnowledgeBase', () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
-  it('throws KNOWLEDGE_BASE_EMPTY_RESPONSE when the upstream returns no entries', async () => {
+  it('treats a 2xx with no entries as a successful dedup (returns a synthetic entry, does not throw)', async () => {
     vi.stubEnv('KNOWLEDGE_BASE_PAT', 'pat_test');
     vi.stubEnv('JWT_SECRET', 'test-secret-key-at-least-32-chars!!');
     vi.stubEnv('DATABASE_URL', 'postgres://test');
@@ -174,9 +174,18 @@ describe('forwardVocabToKnowledgeBase', () => {
         headers: { 'Content-Type': 'application/json' },
       })
     );
-    await expect(
-      forwardVocabToKnowledgeBase({ word: 'x' }, fetchMock as unknown as typeof fetch)
-    ).rejects.toThrow(/no entries/);
+    // A deduped word must NOT throw — throwing made the WordByWord client
+    // re-forward the same word on every sync forever. The forwarder returns a
+    // best-effort entry built from the input so the caller proceeds to the
+    // local insert and clears the dirty flag.
+    const result = await forwardVocabToKnowledgeBase(
+      { word: 'déjà', translation: 'already', targetLanguage: 'french' },
+      fetchMock as unknown as typeof fetch
+    );
+    expect(result.word).toBe('déjà');
+    expect(result.definition).toBe('already');
+    expect(result.language).toBe('french');
+    expect(result.category).toBe('vocabulary');
   });
 });
 

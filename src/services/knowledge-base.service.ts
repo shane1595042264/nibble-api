@@ -147,11 +147,31 @@ export async function forwardVocabToKnowledgeBase(
   const payload = (await res.json()) as { entries?: KnowledgeBaseEntry[] };
   const entry = payload.entries?.[0];
   if (!entry) {
-    throw new AppError(
-      'KNOWLEDGE_BASE_EMPTY_RESPONSE',
-      'Knowledge base returned no entries (was the input deduped?)',
-      502
-    );
+    // A 2xx with no entries means the knowledge base accepted the request but
+    // created nothing new — i.e. it DEDUPED a word it already has. The goal of
+    // this forward is "ensure the word reaches the KB", so a dedup is success,
+    // not failure. Throwing here previously pushed the word onto
+    // failedEntities.vocabulary, which made the WordByWord client bump
+    // updatedAt and re-forward the same word on every sync forever (the
+    // "sync partial — N items will retry" loop). Return a best-effort entry
+    // synthesized from the input so the caller proceeds to the local insert and
+    // clears the dirty flag. The synthetic id is never used by the sync path
+    // (the local PG row keeps the client's own id) and the KB has no GET to
+    // recover the real one.
+    return {
+      id: '',
+      word: input.word,
+      language: input.targetLanguage ?? 'unknown',
+      category: 'vocabulary',
+      definition: input.definition ?? input.translation ?? null,
+      pronunciation: input.pronunciation ?? null,
+      partOfSpeech: null,
+      exampleSentence: input.contextSentence ?? null,
+      labels: [],
+      source: buildKnowledgeSource(input) as KnowledgeBaseEntry['source'],
+      createdAt: '',
+      updatedAt: '',
+    };
   }
   return entry;
 }

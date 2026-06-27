@@ -16,6 +16,12 @@ The reader-side endpoints that superseded them are still live: `/ai/translate-wo
 
 The historical references to the deleted routes at line 58 (File Map), line 2130 (build commit message in the original plan), and lines 2253-2255 (original API table) are left in place as historical context per this section's rule.
 
+### 2026-06-27 — KB dedup is success, not failure (KAN-230)
+
+`forwardVocabToKnowledgeBase` used to throw `KNOWLEDGE_BASE_EMPTY_RESPONSE` when the knowledge base returned a 2xx with an empty `entries[]` array. But that response means the KB **deduped** a word it already has — which is the desired end state for a forward whose whole job is "ensure the word reaches the KB". Throwing pushed the word onto `failedEntities.vocabulary`, so the WordByWord client bumped `updatedAt` and re-forwarded the *same* word on every sync forever — the "sync partial — N items will retry" loop the user reported (461 historical words, all already in the KB after the 2026-05-16 cutover wiped the local PG copy, deduped on every sync).
+
+Now a 2xx with empty entries returns a best-effort entry synthesized from the input instead of throwing, so the caller proceeds to the local PG insert, `serverVocabMap` populates next sync, and the word stops re-forwarding. Only **non-2xx** responses count as forward failures. Don't restore the empty-entries throw.
+
 ### 2026-05-16 — Vocab is no longer stored locally; forwarded to shanejli's knowledge base
 
 The nibble-api `vocabulary` table is no longer the source of truth for vocab. The personal-website knowledge base at https://shanebackend-production.up.railway.app/api/knowledge/notes is.
