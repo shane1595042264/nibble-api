@@ -15,6 +15,14 @@ export const errorHandler: ErrorHandler = (err, c) => {
       400
     );
   }
+  // A request-time SyntaxError comes from c.req.json() failing to parse a
+  // malformed/empty body — that's a client (4xx) error, not a server fault.
+  if (err instanceof SyntaxError) {
+    return c.json(
+      { error: { code: 'VALIDATION_ERROR', message: 'Invalid JSON body', status: 400 } },
+      400
+    );
+  }
   console.error('Unhandled error:', err);
   return c.json(
     { error: { code: 'INTERNAL_ERROR', message: 'Internal server error', status: 500 } },
