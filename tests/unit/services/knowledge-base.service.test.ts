@@ -161,6 +161,34 @@ describe('forwardVocabToKnowledgeBase', () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
+  it('rejects with an AppError (502) on timeout instead of hanging forever', async () => {
+    vi.stubEnv('KNOWLEDGE_BASE_PAT', 'pat_test');
+    vi.stubEnv('JWT_SECRET', 'test-secret-key-at-least-32-chars!!');
+    vi.stubEnv('DATABASE_URL', 'postgres://test');
+    const { forwardVocabToKnowledgeBase } = await import(
+      '../../../src/services/knowledge-base.service.js'
+    );
+    // A fetch that never resolves on its own but honors the abort signal —
+    // exactly how the real fetch behaves when the upstream KB hangs mid-response.
+    // Before the timeout was added this promise (and the whole POST /api/sync)
+    // would wait forever; now AbortSignal.timeout rejects it.
+    const hangingFetch = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation timed out.', 'TimeoutError'));
+          });
+        })
+    );
+    await expect(
+      forwardVocabToKnowledgeBase(
+        { word: 'x' },
+        hangingFetch as unknown as typeof fetch,
+        20 // tiny bound so the test is fast; default is KNOWLEDGE_BASE_TIMEOUT_MS
+      )
+    ).rejects.toMatchObject({ status: 502 });
+  });
+
   it('treats a 2xx with no entries as a successful dedup (returns a synthetic entry, does not throw)', async () => {
     vi.stubEnv('KNOWLEDGE_BASE_PAT', 'pat_test');
     vi.stubEnv('JWT_SECRET', 'test-secret-key-at-least-32-chars!!');

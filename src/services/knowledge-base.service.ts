@@ -7,6 +7,18 @@
 import { config } from '../lib/config.js';
 import { AppError } from '../lib/errors.js';
 
+/**
+ * Short bound for the outbound KB forward. This runs on the INTERACTIVE sync
+ * path (POST /api/sync, awaited sequentially per new word), so it must fail
+ * fast — not block the whole request behind a hung upstream. Mirrors the
+ * AbortSignal.timeout convention introduced for Mathpix in mathpix.service.ts.
+ */
+const KNOWLEDGE_BASE_TIMEOUT_MS = 10_000;
+
+function isAbortTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+}
+
 export interface VocabForwardInput {
   word: string;
   pronunciation?: string;
@@ -104,7 +116,8 @@ export function buildKnowledgeSource(input: VocabForwardInput): Record<string, s
  */
 export async function forwardVocabToKnowledgeBase(
   input: VocabForwardInput,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = KNOWLEDGE_BASE_TIMEOUT_MS
 ): Promise<KnowledgeBaseEntry> {
   if (!config.KNOWLEDGE_BASE_PAT) {
     throw new AppError(
@@ -119,14 +132,33 @@ export async function forwardVocabToKnowledgeBase(
     source: buildKnowledgeSource(input),
   };
 
-  const res = await fetchImpl(`${config.KNOWLEDGE_BASE_URL}/api/knowledge/notes`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.KNOWLEDGE_BASE_PAT}`,
-    },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetchImpl(`${config.KNOWLEDGE_BASE_URL}/api/knowledge/notes`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.KNOWLEDGE_BASE_PAT}`,
+      },
+      body: JSON.stringify(body),
+      // Without this, a hung KB never throws and never reaches the caller's
+      // catch (sync.service.ts:379) — it just stalls the whole POST /api/sync
+      // request indefinitely. A timeout turns the hang into a thrown error so
+      // the existing failedEntities retry path fires.
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (isAbortTimeout(err)) {
+      // 502 (treated like an upstream 5xx) so the caller's catch pushes this
+      // word to failedEntities.vocabulary and the client retries next sync.
+      throw new AppError(
+        'KNOWLEDGE_BASE_TIMEOUT',
+        `Knowledge base did not respond within ${timeoutMs}ms`,
+        502
+      );
+    }
+    throw err;
+  }
 
   if (!res.ok) {
     let detail = '';
