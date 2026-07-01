@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
+import { assertUuidQueryParam } from '../lib/query-guards.js';
 
 export const vocabularyRoutes = new Hono();
 
@@ -44,6 +45,7 @@ vocabularyRoutes.get('/', async (c) => {
   const bookId = c.req.query('bookId');
 
   if (bookId) {
+    assertUuidQueryParam(bookId, 'bookId');
     const entries = await vocabularyRepository.findByBookId(user.id, bookId);
     return c.json(entries);
   }

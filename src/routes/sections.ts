@@ -5,6 +5,7 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
+import { assertUuidQueryParam } from '../lib/query-guards.js';
 
 export const sectionRoutes = new Hono();
 
@@ -70,6 +71,7 @@ sectionRoutes.get('/', async (c) => {
   }
 
   if (bookId) {
+    assertUuidQueryParam(bookId, 'bookId');
     // Verify the book belongs to the user
     await bookService.getBook(bookId, user.id);
     const sections = await sectionRepository.findByBookId(bookId);
@@ -77,6 +79,7 @@ sectionRoutes.get('/', async (c) => {
   }
 
   // chapterId provided — verify ownership through the chapter's book
+  assertUuidQueryParam(chapterId!, 'chapterId');
   const chapter = await chapterRepository.findById(chapterId!);
   if (!chapter) throw Errors.notFound('Chapter');
   await bookService.getBook(chapter.bookId, user.id);

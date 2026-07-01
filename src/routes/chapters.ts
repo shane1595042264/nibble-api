@@ -4,6 +4,7 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
+import { assertUuidQueryParam } from '../lib/query-guards.js';
 
 export const chapterRoutes = new Hono();
 
@@ -53,6 +54,7 @@ chapterRoutes.get('/', async (c) => {
   if (!bookId) {
     throw new AppError('VALIDATION_ERROR', 'bookId query parameter is required', 400);
   }
+  assertUuidQueryParam(bookId, 'bookId');
   // Verify the book belongs to the user
   await bookService.getBook(bookId, user.id);
   const chapters = await chapterRepository.findByBookId(bookId);
