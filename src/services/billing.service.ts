@@ -12,6 +12,44 @@ const stripe = config.STRIPE_SECRET_KEY
   ? new Stripe(config.STRIPE_SECRET_KEY)
   : null;
 
+/**
+ * How long a webhook_events row may sit in 'processing' before we treat it as
+ * abandoned (the handler crashed mid-flight) rather than a genuinely in-flight
+ * concurrent delivery. Biased short: reprocessing is idempotent, so the worst
+ * case for a truly-concurrent delivery is a harmless double-run, whereas
+ * misclassifying a crash-stuck row as "in flight" would permanently drop the
+ * event — the exact failure this fix exists to prevent.
+ */
+export const WEBHOOK_PROCESSING_STALE_MS = 60_000;
+
+export type WebhookAction = 'skip' | 'process';
+
+/**
+ * Decide whether an incoming Stripe event should be (re)processed or skipped,
+ * given the existing webhook_events row (if any).
+ *
+ * Fixes the original bug where ANY existing row — including 'failed' and
+ * crash-stuck 'processing' — was skipped, permanently dropping a paid job on a
+ * single transient failure and defeating Stripe's automatic retry safety net.
+ */
+export function classifyWebhookEvent(
+  existing: { status: string; createdAt: Date | string } | undefined,
+  nowMs: number,
+): WebhookAction {
+  if (!existing) return 'process';
+  // Already handled successfully — short-circuit to avoid duplicate side effects.
+  if (existing.status === 'processed') return 'skip';
+  if (existing.status === 'processing') {
+    const ageMs = nowMs - new Date(existing.createdAt).getTime();
+    // Recent 'processing' row: a concurrent delivery is likely still running.
+    // Old 'processing' row: the prior handler crashed — reprocess to recover.
+    return ageMs < WEBHOOK_PROCESSING_STALE_MS ? 'skip' : 'process';
+  }
+  // 'failed' (or any unknown status): reprocess. The business steps are
+  // idempotent set-operations, so re-running is safe and unlocks the job.
+  return 'process';
+}
+
 export const billingService = {
   async createPaymentIntent(userId: string, jobId: string) {
     if (!stripe) throw Errors.processingFailed('Stripe not configured');
@@ -111,24 +149,50 @@ export const billingService = {
       config.STRIPE_WEBHOOK_SECRET
     );
 
-    // Idempotency check: skip already-processed events
+    // Idempotency check. Only 'processed' rows are true duplicates. A 'failed'
+    // row (transient error on a prior delivery) or a crash-stuck 'processing'
+    // row must be REPROCESSED, not skipped — otherwise a single transient
+    // failure permanently drops a paid job while Stripe stops retrying.
     const [existing] = await db
       .select()
       .from(webhookEvents)
       .where(eq(webhookEvents.stripeEventId, event.id))
       .limit(1);
 
-    if (existing) {
-      console.log(`[Stripe Webhook] Skipping duplicate event ${event.id} (${event.type})`);
+    if (classifyWebhookEvent(existing, Date.now()) === 'skip') {
+      console.log(
+        `[Stripe Webhook] Skipping event ${event.id} (${event.type}) — existing status='${existing?.status}'`,
+      );
       return;
     }
 
-    // Record event before processing
-    await db.insert(webhookEvents).values({
-      stripeEventId: event.id,
-      eventType: event.type,
-      status: 'processing',
-    });
+    if (existing) {
+      // Reprocessing a failed/crash-stuck event: reset the existing row rather
+      // than inserting (stripe_event_id is UNIQUE — a fresh insert would throw).
+      await db
+        .update(webhookEvents)
+        .set({ status: 'processing', error: null })
+        .where(eq(webhookEvents.stripeEventId, event.id));
+    } else {
+      // First delivery: record before processing. onConflictDoNothing tolerates
+      // a truly-concurrent second delivery that raced past the SELECT above; if
+      // it inserted first we get zero rows back and let that delivery own it.
+      const inserted = await db
+        .insert(webhookEvents)
+        .values({
+          stripeEventId: event.id,
+          eventType: event.type,
+          status: 'processing',
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (inserted.length === 0) {
+        console.log(
+          `[Stripe Webhook] Skipping event ${event.id} (${event.type}) — concurrent delivery already recorded it`,
+        );
+        return;
+      }
+    }
 
     try {
       if (event.type === 'payment_intent.succeeded') {
