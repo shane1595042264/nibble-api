@@ -14,6 +14,40 @@ import { eq } from 'drizzle-orm';
 
 const parser = new NibParser();
 
+/**
+ * Reliably mark a book as processingStatus:'error' on a pipeline failure.
+ *
+ * This is the *only* place the pipelines set the book to 'error' — the internal
+ * catch never rethrows, so the caller-level nets (book.service startPipelineAsync,
+ * processing.ts retry route) never run for a pipeline-internal failure. A silently
+ * swallowed write here (the former `.catch(() => {})`) would leave the book stuck
+ * showing 'processing' forever with no error/Retry affordance (KAN-243).
+ *
+ * So: retry a couple times to ride out the transient DB blip that's plausible
+ * precisely when the pipeline just failed (pool exhaustion / connection drop /
+ * timeout), and if it STILL fails, log loudly so ops can see the stuck book
+ * instead of discarding the failure.
+ */
+export async function markBookErrored(bookId: string, jobId: string): Promise<void> {
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      await bookRepository.update(bookId, { processingStatus: 'error' });
+      return;
+    } catch (err: any) {
+      if (attempt === MAX_ATTEMPTS) {
+        console.error(
+          `[processing] CRITICAL: failed to set book ${bookId} to 'error' after ${MAX_ATTEMPTS} attempts (job ${jobId}). Book may be stuck showing 'processing' — manual intervention required.`,
+          err,
+        );
+        return;
+      }
+      // Short linear backoff before retrying the status write.
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
+  }
+}
+
 export const processingService = {
   /**
    * Dispatch the right per-format pipeline based on the book's catalog format.
@@ -400,7 +434,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
       const errorMessage = error.message ?? 'Unknown error';
       await processingLogRepository.append(jobId, 'error', `Pipeline failed: ${errorMessage}`, 'error');
       await processingLogRepository.failJob(jobId, errorMessage);
-      await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
+      await markBookErrored(bookId, jobId);
     }
 }
 
@@ -494,7 +528,7 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
     const errorMessage = error.message ?? 'Unknown error';
     await processingLogRepository.append(jobId, 'error', `EPUB pipeline failed: ${errorMessage}`, 'error');
     await processingLogRepository.failJob(jobId, errorMessage);
-    await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
+    await markBookErrored(bookId, jobId);
   }
 }
 
