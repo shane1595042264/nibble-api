@@ -1,5 +1,10 @@
 import { AppError } from '../lib/errors.js';
 
+// Bound the outbound Google Books lookup so a slow/unreachable googleapis.com
+// cannot stall the synchronous POST /books/upload request path. Matches the
+// AbortSignal.timeout convention in mathpix.service.ts and knowledge-base.service.ts.
+const GOOGLE_BOOKS_TIMEOUT_MS = 15_000;
+
 interface BookMetadata {
   title: string;
   author?: string;
@@ -18,7 +23,9 @@ export const metadataService = {
       let query = encodeURIComponent(title);
       if (author) query += '+inauthor:' + encodeURIComponent(author);
 
-      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${query}&maxResults=1`);
+      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${query}&maxResults=1`, {
+        signal: AbortSignal.timeout(GOOGLE_BOOKS_TIMEOUT_MS),
+      });
       if (!res.ok) return null;
 
       const data = await res.json();
