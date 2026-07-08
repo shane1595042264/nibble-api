@@ -38,6 +38,12 @@ export const bookService = {
   async createBook(userId: string, data: { catalogId: string; customTitle?: string; coverUrl?: string }) {
     const existing = await bookRepository.findByUserIdAndCatalogId(userId, data.catalogId);
     if (existing) throw Errors.duplicateBook();
+    // catalogId is a well-formed UUID (Zod) but may reference no book_catalog row.
+    // Without this check the NOT NULL FK (onDelete: 'restrict') raises Postgres 23503,
+    // which falls through the global error handler as an opaque 500 'Unhandled error'.
+    // Surface a clean 404 instead.
+    const catalog = await bookRepository.findCatalogById(data.catalogId);
+    if (!catalog) throw Errors.notFound('Catalog entry');
     return bookRepository.create({ ...data, userId });
   },
 
