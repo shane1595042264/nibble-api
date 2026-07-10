@@ -6,7 +6,9 @@ import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
-import { nibCache, processingJobs, sections, chapters } from '../db/schema.js';
+import { nibCache, processingJobs } from '../db/schema.js';
+import { chapterRepository } from '../repositories/chapter.repository.js';
+import { sectionRepository } from '../repositories/section.repository.js';
 import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
 import { AppError, Errors } from '../lib/errors.js';
@@ -113,9 +115,11 @@ processingRoutes.post('/:jobId/retry', async (c) => {
 
   // Wrap deletes + insert in a transaction to prevent data loss if any step fails
   const { newJob } = await db.transaction(async (tx) => {
-    // Clean up old chapters/sections from the failed attempt
-    await tx.delete(sections).where(eq(sections.bookId, book.id));
-    await tx.delete(chapters).where(eq(chapters.bookId, book.id));
+    // Soft-delete old chapters/sections from the failed attempt so sync ships
+    // deletedAt tombstones to other devices instead of leaving them with stale
+    // structure that they could resurrect on their next push (KAN-229 / KAN-254).
+    await sectionRepository.softDeleteByBookId(book.id, tx);
+    await chapterRepository.softDeleteByBookId(book.id, tx);
 
     // Create a new processing job
     const [createdJob] = await tx.insert(processingJobs).values({
