@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
-import { assertUuidQueryParam } from '../lib/query-guards.js';
+import { assertUuidQueryParam, assertUuidPathParam } from '../lib/query-guards.js';
 
 export const vocabularyRoutes = new Hono();
 
@@ -56,7 +56,8 @@ vocabularyRoutes.get('/', async (c) => {
 
 vocabularyRoutes.get('/:id', async (c) => {
   const user = c.get('user');
-  const entry = await vocabularyRepository.findById(c.req.param('id'));
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const entry = await vocabularyRepository.findById(id);
   if (!entry || entry.userId !== user.id) throw Errors.notFound('Vocabulary entry');
   return c.json(entry);
 });
@@ -77,7 +78,8 @@ vocabularyRoutes.post('/', async (c) => {
 
 vocabularyRoutes.put('/:id', async (c) => {
   const user = c.get('user');
-  const existing = await vocabularyRepository.findById(c.req.param('id'));
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const existing = await vocabularyRepository.findById(id);
   if (!existing || existing.userId !== user.id) throw Errors.notFound('Vocabulary entry');
 
   const body = await c.req.json();
@@ -92,14 +94,15 @@ vocabularyRoutes.put('/:id', async (c) => {
     data.lastReviewedAt = new Date(parsed.data.lastReviewedAt);
   }
 
-  const entry = await vocabularyRepository.update(c.req.param('id'), data);
+  const entry = await vocabularyRepository.update(id, data);
   return c.json(entry);
 });
 
 vocabularyRoutes.delete('/:id', async (c) => {
   const user = c.get('user');
-  const existing = await vocabularyRepository.findById(c.req.param('id'));
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const existing = await vocabularyRepository.findById(id);
   if (!existing || existing.userId !== user.id) throw Errors.notFound('Vocabulary entry');
-  const entry = await vocabularyRepository.softDelete(c.req.param('id'));
+  const entry = await vocabularyRepository.softDelete(id);
   return c.json(entry);
 });

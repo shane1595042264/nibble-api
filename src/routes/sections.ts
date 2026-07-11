@@ -5,7 +5,7 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
 import { AppError, Errors } from '../lib/errors.js';
-import { assertUuidQueryParam } from '../lib/query-guards.js';
+import { assertUuidQueryParam, assertUuidPathParam } from '../lib/query-guards.js';
 
 export const sectionRoutes = new Hono();
 
@@ -52,6 +52,7 @@ export const updateSectionSchema = z.object({
 // ─── Helpers ───────────────────────────────────────────────────────
 
 async function verifySectionOwnership(sectionId: string, userId: string) {
+  assertUuidPathParam(sectionId, 'id');
   const section = await sectionRepository.findById(sectionId);
   if (!section) throw Errors.notFound('Section');
   // Verify the book belongs to this user

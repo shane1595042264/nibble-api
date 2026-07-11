@@ -20,6 +20,20 @@ export function assertUuidQueryParam(value: string, paramName: string): string {
   return value;
 }
 
+/**
+ * Validate a path-param value (e.g. an item route's :id) as a UUID before it
+ * reaches a Postgres uuid column. Same 22P02 -> opaque 500 problem as
+ * assertUuidQueryParam, but for the item routes' :id path params, which the
+ * KAN-237 query-param guard never covered. Throw a 400 VALIDATION_ERROR naming
+ * the param instead of letting the raw id hit findById/update/softDelete.
+ */
+export function assertUuidPathParam(value: string, paramName: string): string {
+  if (!uuidQuerySchema.safeParse(value).success) {
+    throw new AppError('VALIDATION_ERROR', `${paramName} must be a valid UUID`, 400);
+  }
+  return value;
+}
+
 interface CapWarnContext {
   entity: string;
   userId?: string;
