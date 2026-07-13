@@ -211,6 +211,12 @@ export const bookService = {
       await db.delete(chaptersTable).where(eq(chaptersTable.bookId, deleted.id));
 
       const restoredBook = await bookRepository.restore(deleted.id, { processingStatus: 'pending' });
+      // restore() is genuinely nullable: the UPDATE ... .returning() yields no row if the
+      // target vanished between the find and the update. Fail loud here instead of asserting
+      // non-null and shipping { book: null } to a client that dereferences data.book.id.
+      if (!restoredBook) {
+        throw Errors.processingFailed('Failed to restore previously deleted book during re-upload');
+      }
 
       const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
         const [activeJob] = await tx
@@ -246,7 +252,7 @@ export const bookService = {
         startPipelineAsync(jobId, fileHash, deleted.id, mode);
       }
 
-      return { book: restoredBook!, catalogEntry, jobId, isNew: false };
+      return { book: restoredBook, catalogEntry, jobId, isNew: false };
     }
 
     // Truly new book — create fresh
