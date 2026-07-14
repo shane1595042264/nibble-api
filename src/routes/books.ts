@@ -158,8 +158,11 @@ bookRoutes.get('/:id/download', async (c) => {
   const { storageService } = await import('../services/storage.service.js');
   const buffer = await storageService.downloadPdf(pdfFile.r2Key);
 
-  c.header('Content-Type', 'application/pdf');
-  c.header('Content-Disposition', `attachment; filename="${sanitizeFilename(catalog.title || 'book')}.pdf"`);
+  const isEpub = catalog.format === 'epub';
+  const contentType = isEpub ? 'application/epub+zip' : 'application/pdf';
+  const ext = isEpub ? 'epub' : 'pdf';
+  c.header('Content-Type', contentType);
+  c.header('Content-Disposition', `attachment; filename="${sanitizeFilename(catalog.title || 'book')}.${ext}"`);
   return c.body(new Uint8Array(buffer));
 });
 
