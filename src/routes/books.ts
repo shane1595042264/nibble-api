@@ -4,6 +4,7 @@ import { bookService } from '../services/book.service.js';
 import { AppError } from '../lib/errors.js';
 import { config } from '../lib/config.js';
 import { HAIKU_MODEL } from '../lib/ai-models.js';
+import { assertUuidPathParam } from '../lib/query-guards.js';
 
 export const bookRoutes = new Hono();
 
@@ -114,7 +115,8 @@ bookRoutes.get('/', async (c) => {
 
 bookRoutes.get('/:id', async (c) => {
   const user = c.get('user');
-  const book = await bookService.getBook(c.req.param('id'), user.id);
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const book = await bookService.getBook(id, user.id);
   return c.json(book);
 });
 
@@ -136,14 +138,16 @@ bookRoutes.put('/:id', async (c) => {
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
   }
-  const book = await bookService.updateBook(c.req.param('id'), user.id, parsed.data);
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const book = await bookService.updateBook(id, user.id, parsed.data);
   return c.json(book);
 });
 
 // GET /:id/download — download PDF from R2
 bookRoutes.get('/:id/download', async (c) => {
   const user = c.get('user');
-  const book = await bookService.getBook(c.req.param('id'), user.id);
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const book = await bookService.getBook(id, user.id);
 
   const { bookRepository } = await import('../repositories/book.repository.js');
   const catalog = await bookRepository.findCatalogById(book.catalogId);
@@ -169,7 +173,8 @@ bookRoutes.get('/:id/download', async (c) => {
 // GET /:id/summary — get book with catalog info for sync
 bookRoutes.get('/:id/summary', async (c) => {
   const user = c.get('user');
-  const book = await bookService.getBook(c.req.param('id'), user.id);
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const book = await bookService.getBook(id, user.id);
   const { bookRepository } = await import('../repositories/book.repository.js');
   const catalog = await bookRepository.findCatalogById(book.catalogId);
   return c.json({ book, catalog });
@@ -177,7 +182,8 @@ bookRoutes.get('/:id/summary', async (c) => {
 
 bookRoutes.delete('/:id', async (c) => {
   const user = c.get('user');
-  const book = await bookService.deleteBook(c.req.param('id'), user.id);
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const book = await bookService.deleteBook(id, user.id);
   return c.json(book);
 });
 
@@ -201,7 +207,8 @@ bookRoutes.put('/:id/metadata', async (c) => {
   if (!parsed.success) {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
   }
-  const result = await bookService.updateBookMetadata(c.req.param('id'), user.id, parsed.data);
+  const id = assertUuidPathParam(c.req.param('id'), 'id');
+  const result = await bookService.updateBookMetadata(id, user.id, parsed.data);
   return c.json(result);
 });
 
@@ -247,7 +254,7 @@ const suggestStructureSchema = z.object({
 // PUT /:id/structure — replace entire chapter/section structure
 bookRoutes.put('/:id/structure', async (c) => {
   const user = c.get('user');
-  const bookId = c.req.param('id');
+  const bookId = assertUuidPathParam(c.req.param('id'), 'id');
   const book = await bookService.getBook(bookId, user.id);
 
   const body = await c.req.json();
@@ -373,7 +380,7 @@ bookRoutes.put('/:id/structure', async (c) => {
 // POST /:id/suggest-structure — use Claude Vision to parse TOC pages
 bookRoutes.post('/:id/suggest-structure', async (c) => {
   const user = c.get('user');
-  const bookId = c.req.param('id');
+  const bookId = assertUuidPathParam(c.req.param('id'), 'id');
   const book = await bookService.getBook(bookId, user.id);
 
   const body = await c.req.json();
