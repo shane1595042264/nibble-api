@@ -13,6 +13,7 @@ import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
 import { AppError, Errors } from '../lib/errors.js';
 import { hasFreeAiAccess } from '../lib/billing-access.js';
+import { assertUuidPathParam } from '../lib/query-guards.js';
 
 export const processingRoutes = new Hono();
 
@@ -71,6 +72,7 @@ processingRoutes.post('/start', async (c) => {
 processingRoutes.post('/:jobId/cancel', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
+  assertUuidPathParam(jobId, 'jobId');
 
   const job = await processingLogRepository.getJob(jobId);
   if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
@@ -88,6 +90,7 @@ processingRoutes.post('/:jobId/cancel', async (c) => {
 processingRoutes.post('/:jobId/retry', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
+  assertUuidPathParam(jobId, 'jobId');
 
   // Atomic claim: only one concurrent /retry for this jobId wins. Flipping the
   // source row out of 'failed' is the canonical mutex — re-reads tell us why
@@ -154,6 +157,7 @@ processingRoutes.post('/:jobId/retry', async (c) => {
 processingRoutes.get('/:jobId', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
+  assertUuidPathParam(jobId, 'jobId');
 
   const job = await processingLogRepository.getJob(jobId);
   if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
@@ -180,6 +184,7 @@ processingRoutes.get('/:jobId', async (c) => {
 processingRoutes.get('/:jobId/logs', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
+  assertUuidPathParam(jobId, 'jobId');
 
   const job = await processingLogRepository.getJob(jobId);
   if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
@@ -199,6 +204,7 @@ processingRoutes.get('/:jobId/logs', async (c) => {
 processingRoutes.get('/:jobId/logs/download', async (c) => {
   const user = c.get('user');
   const jobId = c.req.param('jobId');
+  assertUuidPathParam(jobId, 'jobId');
 
   const job = await processingLogRepository.getJob(jobId);
   if (!job || job.userId !== user.id) throw Errors.notFound('Processing job');
