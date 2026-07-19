@@ -42,6 +42,7 @@ interface SyncResponse {
     chapters: string[];
     sections: string[];
     vocabulary: string[];
+    exerciseProgress: string[];
   };
   syncedAt: string;
 }
@@ -157,6 +158,7 @@ export const syncService = {
       chapters: [] as string[],
       sections: [] as string[],
       vocabulary: [] as string[],
+      exerciseProgress: [] as string[],
     };
 
     // ── 1. Apply client changes ──────────────────────────────────
@@ -407,47 +409,31 @@ export const syncService = {
     }
 
     // Settings
+    // Per-entity guard: a malformed settings blob must not throw and 500 the
+    // whole sync (matches the books/chapters/etc. pattern). Settings is a single
+    // blob with no per-id, so on failure we log and continue — the rest of the
+    // sync still completes and the client retries the settings write next tick.
     if (payload.changes.settings) {
-      const serverSettings = await settingsRepository.findByUserId(userId);
-      if (!serverSettings) {
-        await settingsRepository.upsert(userId, payload.changes.settings as any);
-      } else {
+      try {
         // Settings don't have an updatedAt in the payload; always apply (last-write-wins from client)
         await settingsRepository.upsert(userId, payload.changes.settings as any);
+      } catch (e) {
+        console.error('[sync] settings error:', e);
       }
     }
 
     // Exercise progress
     for (const clientProgress of payload.changes.exerciseProgress) {
-      const server = serverProgressMap.get(clientProgress.id);
-      if (!server) {
-        // Use upsert to handle potential exerciseId conflicts
-        if (clientProgress.exerciseId && clientProgress.bookId) {
-          await exerciseRepository.upsertProgress(
-            userId,
-            clientProgress.exerciseId as string,
-            {
-              bookId: clientProgress.bookId as string,
-              status: clientProgress.status as string | undefined,
-              notes: clientProgress.notes as string | undefined,
-              completedAt: clientProgress.completedAt ? new Date(clientProgress.completedAt as string) : undefined,
-              timeSpentSeconds: clientProgress.timeSpentSeconds as number | undefined,
-              metadata: clientProgress.metadata as Record<string, unknown> | undefined,
-            },
-          );
-        }
-      } else {
-        const clientTime = new Date(clientProgress.updatedAt).getTime();
-        const serverTime = new Date(server.updatedAt).getTime();
-        if (clientTime > serverTime) {
-          if (clientProgress.deletedAt) {
-            await exerciseRepository.softDeleteProgress(clientProgress.id);
-          } else {
+      try {
+        const server = serverProgressMap.get(clientProgress.id);
+        if (!server) {
+          // Use upsert to handle potential exerciseId conflicts
+          if (clientProgress.exerciseId && clientProgress.bookId) {
             await exerciseRepository.upsertProgress(
               userId,
-              server.exerciseId,
+              clientProgress.exerciseId as string,
               {
-                bookId: server.bookId,
+                bookId: clientProgress.bookId as string,
                 status: clientProgress.status as string | undefined,
                 notes: clientProgress.notes as string | undefined,
                 completedAt: clientProgress.completedAt ? new Date(clientProgress.completedAt as string) : undefined,
@@ -456,7 +442,34 @@ export const syncService = {
               },
             );
           }
+        } else {
+          const clientTime = new Date(clientProgress.updatedAt).getTime();
+          const serverTime = new Date(server.updatedAt).getTime();
+          if (clientTime > serverTime) {
+            if (clientProgress.deletedAt) {
+              await exerciseRepository.softDeleteProgress(clientProgress.id);
+            } else {
+              await exerciseRepository.upsertProgress(
+                userId,
+                server.exerciseId,
+                {
+                  bookId: server.bookId,
+                  status: clientProgress.status as string | undefined,
+                  notes: clientProgress.notes as string | undefined,
+                  completedAt: clientProgress.completedAt ? new Date(clientProgress.completedAt as string) : undefined,
+                  timeSpentSeconds: clientProgress.timeSpentSeconds as number | undefined,
+                  metadata: clientProgress.metadata as Record<string, unknown> | undefined,
+                },
+              );
+            }
+          }
         }
+      } catch (e) {
+        // A malformed row (e.g. an Invalid Date completedAt that Postgres rejects)
+        // must not throw and 500 the whole sync. Push the id to failedEntities so
+        // the client re-bumps updatedAt and retries, matching the per-entity contract.
+        console.error('[sync] exerciseProgress error:', clientProgress.id, e);
+        failedEntities.exerciseProgress.push(clientProgress.id);
       }
     }
 
