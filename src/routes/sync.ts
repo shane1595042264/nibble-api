@@ -11,6 +11,20 @@ export const syncRoutes = new Hono();
 const SECTION_RICH_CONTENT_MAX = 2_000_000;
 const CHAPTER_TITLE_MAX = 500;
 
+// Array-count caps on the sync payload. A first-ever full sync of a large library
+// is the legitimate upper bound; anything past these is a malformed/abusive payload.
+// Unlike per-entity field-bounds violations (which route to failedEntities to
+// preserve the client's dirty-flag bookkeeping), an array-count overflow is a
+// structural violation and fails the WHOLE request with 400 via the existing
+// safeParse guard in the route. Sized well above any realistic library yet far
+// below a DoS payload. vocabulary is capped lower because every NEW vocab entry
+// fans out one external POST to shanejli's knowledge base (sync.service.ts).
+export const MAX_SYNC_BOOKS = 5_000;
+export const MAX_SYNC_CHAPTERS = 20_000;
+export const MAX_SYNC_SECTIONS = 20_000;
+export const MAX_SYNC_VOCABULARY = 10_000;
+export const MAX_SYNC_EXERCISE_PROGRESS = 20_000;
+
 // ─── Zod schemas ────────────────────────────────────────────────────
 
 const syncEntitySchema = z.object({
@@ -79,15 +93,15 @@ const syncSettingsSchema = z.object({
   keymapOverrides: z.record(z.string(), z.unknown()).optional().catch(undefined),
 }).passthrough();
 
-const syncPayloadSchema = z.object({
+export const syncPayloadSchema = z.object({
   lastSyncedAt: z.string(),
   changes: z.object({
-    books: z.array(syncEntitySchema).default([]),
-    chapters: z.array(syncEntitySchema).default([]),
-    sections: z.array(syncSectionSchema).default([]),
-    vocabulary: z.array(syncEntitySchema).default([]),
+    books: z.array(syncEntitySchema).max(MAX_SYNC_BOOKS).default([]),
+    chapters: z.array(syncEntitySchema).max(MAX_SYNC_CHAPTERS).default([]),
+    sections: z.array(syncSectionSchema).max(MAX_SYNC_SECTIONS).default([]),
+    vocabulary: z.array(syncEntitySchema).max(MAX_SYNC_VOCABULARY).default([]),
     settings: syncSettingsSchema.nullable().default(null),
-    exerciseProgress: z.array(syncEntitySchema).default([]),
+    exerciseProgress: z.array(syncEntitySchema).max(MAX_SYNC_EXERCISE_PROGRESS).default([]),
   }),
 });
 

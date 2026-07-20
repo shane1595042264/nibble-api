@@ -8,7 +8,16 @@ import {
   SECTION_EXTRACTED_TEXT_MAX,
 } from '../../../src/routes/sections.js';
 import { updateMetadataSchema } from '../../../src/routes/books.js';
-import { chapterBoundsSchema, sectionBoundsSchema } from '../../../src/routes/sync.js';
+import {
+  chapterBoundsSchema,
+  sectionBoundsSchema,
+  syncPayloadSchema,
+  MAX_SYNC_BOOKS,
+  MAX_SYNC_CHAPTERS,
+  MAX_SYNC_SECTIONS,
+  MAX_SYNC_VOCABULARY,
+  MAX_SYNC_EXERCISE_PROGRESS,
+} from '../../../src/routes/sync.js';
 
 const validBookId = '11111111-1111-4111-8111-111111111111';
 const validChapterId = '22222222-2222-4222-8222-222222222222';
@@ -316,6 +325,44 @@ describe('sync route bounds schemas (per-entity pre-filter)', () => {
     });
     expect(r.success).toBe(false);
   });
+});
+
+describe('syncPayloadSchema array-count bounds (whole-request 400)', () => {
+  const entity = (i: number) => ({ id: `id-${i}`, updatedAt: 'now' });
+  const arr = (n: number) => Array.from({ length: n }, (_, i) => entity(i));
+  const base = { lastSyncedAt: 'now', changes: {} as Record<string, unknown> };
+
+  it('accepts a well-formed payload with small arrays', () => {
+    const r = syncPayloadSchema.safeParse({
+      lastSyncedAt: 'now',
+      changes: { books: arr(3), chapters: arr(3), sections: arr(3), vocabulary: arr(3), exerciseProgress: arr(3) },
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('accepts an empty changes object (all arrays default)', () => {
+    expect(syncPayloadSchema.safeParse({ lastSyncedAt: 'now', changes: {} }).success).toBe(true);
+  });
+
+  const cases: Array<[string, number]> = [
+    ['books', MAX_SYNC_BOOKS],
+    ['chapters', MAX_SYNC_CHAPTERS],
+    ['sections', MAX_SYNC_SECTIONS],
+    ['vocabulary', MAX_SYNC_VOCABULARY],
+    ['exerciseProgress', MAX_SYNC_EXERCISE_PROGRESS],
+  ];
+
+  for (const [key, cap] of cases) {
+    it(`${key} accepts exactly ${cap} items`, () => {
+      const r = syncPayloadSchema.safeParse({ ...base, changes: { [key]: arr(cap) } });
+      expect(r.success).toBe(true);
+    });
+
+    it(`${key} rejects ${cap + 1} items`, () => {
+      const r = syncPayloadSchema.safeParse({ ...base, changes: { [key]: arr(cap + 1) } });
+      expect(r.success).toBe(false);
+    });
+  }
 });
 
 describe('books updateMetadataSchema', () => {
