@@ -9,7 +9,7 @@ import { sectionRepository } from '../repositories/section.repository.js';
 import { NibParser } from '../lib/nib/parser.js';
 import { NibDocument } from '../lib/nib/models.js';
 import { db } from '../db/index.js';
-import { pdfFiles, sections, chapters, bookCatalog, books } from '../db/schema.js';
+import { pdfFiles, bookCatalog, books } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 const parser = new NibParser();
@@ -69,10 +69,17 @@ export const processingService = {
     await processingLogRepository.failJob(jobId, 'Cancelled by user');
     const job = await processingLogRepository.getJob(jobId);
     if (job?.bookId) {
-      // Clean up: delete chapters/sections created during processing, reset book status
-      await db.delete(sections).where(eq(sections.bookId, job.bookId));
-      await db.delete(chapters).where(eq(chapters.bookId, job.bookId));
-      await bookRepository.update(job.bookId, { processingStatus: 'error' });
+      const bookId = job.bookId;
+      // Clean up structure created during processing, then reset book status.
+      // Soft-delete (not hard-delete) inside a transaction so sync ships deletedAt
+      // tombstones to other devices instead of leaving them with stale chapters/
+      // sections they could resurrect on their next push. Mirrors the retry path
+      // (src/routes/processing.ts) — KAN-229 / KAN-254 fixed retry; KAN-270 the cancel path.
+      await db.transaction(async (tx) => {
+        await sectionRepository.softDeleteByBookId(bookId, tx);
+        await chapterRepository.softDeleteByBookId(bookId, tx);
+      });
+      await bookRepository.update(bookId, { processingStatus: 'error' });
     }
   },
 };

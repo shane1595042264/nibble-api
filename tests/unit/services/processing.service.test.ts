@@ -5,7 +5,25 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // repositories). We only exercise markBookErrored here, so stub out everything
 // that has import-time side effects or needs real config/network.
 
-const { updateMock } = vi.hoisted(() => ({ updateMock: vi.fn() }));
+const {
+  updateMock,
+  dbDeleteMock,
+  transactionMock,
+  getJobMock,
+  appendMock,
+  failJobMock,
+  sectionSoftDeleteMock,
+  chapterSoftDeleteMock,
+} = vi.hoisted(() => ({
+  updateMock: vi.fn(),
+  dbDeleteMock: vi.fn(),
+  transactionMock: vi.fn(),
+  getJobMock: vi.fn(),
+  appendMock: vi.fn(),
+  failJobMock: vi.fn(),
+  sectionSoftDeleteMock: vi.fn(),
+  chapterSoftDeleteMock: vi.fn(),
+}));
 
 vi.mock('../../../src/lib/config.js', () => ({
   config: {
@@ -16,7 +34,9 @@ vi.mock('../../../src/lib/config.js', () => ({
     R2_SECRET_ACCESS_KEY: 'test',
   },
 }));
-vi.mock('../../../src/db/index.js', () => ({ db: {} }));
+vi.mock('../../../src/db/index.js', () => ({
+  db: { delete: dbDeleteMock, transaction: transactionMock },
+}));
 vi.mock('../../../src/services/storage.service.js', () => ({ storageService: {} }));
 vi.mock('../../../src/services/pdf.service.js', () => ({ pdfService: {} }));
 vi.mock('../../../src/services/epub.service.js', () => ({ parseEpub: vi.fn() }));
@@ -24,12 +44,16 @@ vi.mock('../../../src/repositories/book.repository.js', () => ({
   bookRepository: { update: updateMock },
 }));
 vi.mock('../../../src/repositories/processing-log.repository.js', () => ({
-  processingLogRepository: {},
+  processingLogRepository: { getJob: getJobMock, append: appendMock, failJob: failJobMock },
 }));
-vi.mock('../../../src/repositories/chapter.repository.js', () => ({ chapterRepository: {} }));
-vi.mock('../../../src/repositories/section.repository.js', () => ({ sectionRepository: {} }));
+vi.mock('../../../src/repositories/chapter.repository.js', () => ({
+  chapterRepository: { softDeleteByBookId: chapterSoftDeleteMock },
+}));
+vi.mock('../../../src/repositories/section.repository.js', () => ({
+  sectionRepository: { softDeleteByBookId: sectionSoftDeleteMock },
+}));
 
-import { markBookErrored } from '../../../src/services/processing.service.js';
+import { markBookErrored, processingService } from '../../../src/services/processing.service.js';
 
 describe('markBookErrored (KAN-243)', () => {
   beforeEach(() => {
@@ -76,5 +100,49 @@ describe('markBookErrored (KAN-243)', () => {
     updateMock.mockRejectedValue(new Error('db down'));
     vi.spyOn(console, 'error').mockImplementation(() => {});
     await expect(markBookErrored('book-4', 'job-4')).resolves.toBeUndefined();
+  });
+});
+
+describe('processingService.cancelJob (KAN-270)', () => {
+  beforeEach(() => {
+    updateMock.mockReset().mockResolvedValue(undefined);
+    dbDeleteMock.mockReset();
+    getJobMock.mockReset();
+    appendMock.mockReset().mockResolvedValue(undefined);
+    failJobMock.mockReset().mockResolvedValue(undefined);
+    sectionSoftDeleteMock.mockReset().mockResolvedValue(undefined);
+    chapterSoftDeleteMock.mockReset().mockResolvedValue(undefined);
+    // Run the transaction callback with a stand-in executor, mirroring db.transaction.
+    transactionMock.mockReset().mockImplementation(async (cb: (tx: unknown) => unknown) => cb({ tx: true }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('soft-deletes chapters/sections (never hard-deletes) so sync ships tombstones', async () => {
+    getJobMock.mockResolvedValue({ bookId: 'book-9' });
+
+    await processingService.cancelJob('job-9');
+
+    // The regression this ticket guards against: raw db.delete must NOT be used.
+    expect(dbDeleteMock).not.toHaveBeenCalled();
+    expect(sectionSoftDeleteMock).toHaveBeenCalledWith('book-9', expect.anything());
+    expect(chapterSoftDeleteMock).toHaveBeenCalledWith('book-9', expect.anything());
+    // Soft-deletes run inside a transaction, matching the retry path.
+    expect(transactionMock).toHaveBeenCalledTimes(1);
+    // Book status is reset after cleanup.
+    expect(updateMock).toHaveBeenCalledWith('book-9', { processingStatus: 'error' });
+  });
+
+  it('is a no-op on structure cleanup when the job has no associated book', async () => {
+    getJobMock.mockResolvedValue({ bookId: null });
+
+    await processingService.cancelJob('job-10');
+
+    expect(transactionMock).not.toHaveBeenCalled();
+    expect(sectionSoftDeleteMock).not.toHaveBeenCalled();
+    expect(chapterSoftDeleteMock).not.toHaveBeenCalled();
+    expect(updateMock).not.toHaveBeenCalled();
   });
 });
