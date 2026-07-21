@@ -16,6 +16,8 @@ export const Errors = {
     new AppError('FORBIDDEN', msg, 403),
   notFound: (resource: string) =>
     new AppError('NOT_FOUND', `${resource} not found`, 404),
+  conflict: (msg: string) =>
+    new AppError('CONFLICT', msg, 409),
   duplicateBook: () =>
     new AppError('DUPLICATE_BOOK', 'Book already in your library', 409),
   paymentRequired: () =>

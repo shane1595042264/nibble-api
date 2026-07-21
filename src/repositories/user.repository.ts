@@ -1,8 +1,16 @@
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
 
 export const userRepository = {
+  async countAdmins() {
+    const [row] = await db
+      .select({ n: count() })
+      .from(users)
+      .where(eq(users.authRole, 'admin'));
+    return Number(row?.n ?? 0);
+  },
+
   async findById(id: string) {
     const [user] = await db
       .select()

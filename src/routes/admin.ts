@@ -46,6 +46,24 @@ adminRoutes.get('/users', async (c) => {
   return c.json(allUsers);
 });
 
+// Pure guard for the role-change endpoint. Returns a rejection message when a
+// demotion (admin -> user) would lock everyone out of the admin surface — the
+// admin demoting their own account, or removing the last remaining admin.
+// Returns null when the change is safe. Promotions and no-op writes always pass.
+export function roleDemotionGuardError(args: {
+  role: 'admin' | 'user';
+  targetId: string;
+  targetRole: string;
+  callerId: string;
+  adminCount: number;
+}): string | null {
+  const { role, targetId, targetRole, callerId, adminCount } = args;
+  if (role !== 'user' || targetRole !== 'admin') return null;
+  if (targetId === callerId) return 'You cannot demote your own admin account';
+  if (adminCount <= 1) return 'Cannot demote the last remaining admin';
+  return null;
+}
+
 // Update user role
 adminRoutes.put('/users/:id/role', async (c) => {
   const userId = uuidParamSchema.parse(c.req.param('id'));
@@ -54,6 +72,22 @@ adminRoutes.put('/users/:id/role', async (c) => {
 
   const target = await userRepository.findById(userId);
   if (!target) throw Errors.notFound('User');
+
+  // Guard the admin surface: a demotion must not lock everyone out. Only count
+  // admins when the request is actually a demotion (avoids an extra query on
+  // promotions / no-op writes).
+  if (role === 'user' && target.authRole === 'admin') {
+    const caller = c.get('user');
+    const adminCount = await userRepository.countAdmins();
+    const rejection = roleDemotionGuardError({
+      role,
+      targetId: target.id,
+      targetRole: target.authRole,
+      callerId: caller.id,
+      adminCount,
+    });
+    if (rejection) throw Errors.conflict(rejection);
+  }
 
   const updated = await userRepository.update(userId, { authRole: role });
   return c.json({ id: updated.id, email: updated.email, authRole: updated.authRole });
