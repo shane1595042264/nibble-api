@@ -26,7 +26,10 @@ export const metadataService = {
       const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${query}&maxResults=1`, {
         signal: AbortSignal.timeout(GOOGLE_BOOKS_TIMEOUT_MS),
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        console.error('[metadata] Google Books returned non-ok status:', res.status, 'for title:', title);
+        return null;
+      }
 
       const data = await res.json();
       if (!data.items || data.items.length === 0) return null;
@@ -44,7 +47,15 @@ export const metadataService = {
         categories: vol.categories,
         language: vol.language,
       };
-    } catch {
+    } catch (err) {
+      // Best-effort lookup: never fail the upload on a metadata miss, but leave a
+      // server trace so operators can tell a transient Google Books outage apart
+      // from a genuine no-match. Distinguish the 15s timeout/abort from other errors.
+      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        console.error('[metadata] Google Books lookup timed out for title:', title, err.name);
+      } else {
+        console.error('[metadata] Google Books lookup failed for title:', title, err);
+      }
       return null;
     }
   },

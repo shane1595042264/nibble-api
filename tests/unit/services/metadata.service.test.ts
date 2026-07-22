@@ -41,4 +41,39 @@ describe('metadata.service Google Books lookup', () => {
     // back to manual metadata and the upload still completes.
     await expect(metadataService.lookupGoogleBooks('Dune')).resolves.toBeNull();
   });
+
+  it('logs the timeout branch so a transient outage leaves a server trace', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const abortErr = new Error('The operation was aborted due to timeout');
+    abortErr.name = 'TimeoutError';
+    fetchMock.mockRejectedValueOnce(abortErr);
+
+    await expect(metadataService.lookupGoogleBooks('Dune')).resolves.toBeNull();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0][0]).toContain('[metadata]');
+    expect(errorSpy.mock.calls[0][0]).toContain('timed out');
+  });
+
+  it('logs a non-timeout failure distinctly from the timeout branch', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchMock.mockRejectedValueOnce(new TypeError('network down'));
+
+    await expect(metadataService.lookupGoogleBooks('Dune')).resolves.toBeNull();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0][0]).toContain('[metadata]');
+    expect(errorSpy.mock.calls[0][0]).toContain('failed');
+  });
+
+  it('logs the non-ok HTTP status at the previously-silent early return', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
+
+    await expect(metadataService.lookupGoogleBooks('Dune')).resolves.toBeNull();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0][0]).toContain('[metadata]');
+    expect(errorSpy.mock.calls[0][1]).toBe(503);
+  });
 });
