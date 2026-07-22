@@ -23,20 +23,29 @@ export const settingsRepository = {
       keymapOverrides: Record<string, unknown>;
     }>,
   ) {
-    const existing = await this.findByUserId(userId);
-    if (existing) {
-      const [updated] = await db
-        .update(userSettings)
-        .set(data)
-        .where(eq(userSettings.userId, userId))
+    // Atomic upsert via INSERT ... ON CONFLICT (user_id). Replaces the previous
+    // check-then-act (SELECT then INSERT/UPDATE), which raced the UNIQUE(user_id)
+    // constraint when two concurrent first-writes both missed the SELECT.
+    if (Object.keys(data).length === 0) {
+      // Nothing to write: ensure a row exists without a spurious updatedAt bump.
+      const [row] = await db
+        .insert(userSettings)
+        .values({ userId })
+        .onConflictDoNothing({ target: userSettings.userId })
         .returning();
-      return updated;
+      return row ?? (await this.findByUserId(userId));
     }
-    const [created] = await db
+    // $onUpdate fires on .update() but NOT on onConflictDoUpdate, so set
+    // updatedAt explicitly to keep findModifiedSince working across devices.
+    const [row] = await db
       .insert(userSettings)
       .values({ userId, ...data })
+      .onConflictDoUpdate({
+        target: userSettings.userId,
+        set: { ...data, updatedAt: new Date() },
+      })
       .returning();
-    return created;
+    return row;
   },
 
   async findModifiedSince(userId: string, since: Date) {
