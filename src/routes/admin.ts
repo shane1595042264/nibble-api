@@ -101,16 +101,26 @@ adminRoutes.get('/catalog', async (c) => {
     search: c.req.query('search'),
   });
 
-  // Use bookRepository catalog methods
-  if (search) {
-    const results = await bookRepository.findCatalogByFuzzyTitle(search);
-    return c.json({ data: results, page, total: results.length });
-  }
-
-  // For paginated listing, query directly
   const { bookCatalog } = await import('../db/schema.js');
   const offset = (page - 1) * limit;
-  const data = await db.select().from(bookCatalog).limit(limit).offset(offset);
+
+  // Use bookRepository catalog methods
+  if (search) {
+    // findCatalogByFuzzyTitle returns the full ranked match set (capped at
+    // MAX_LIST_ROWS). Paginate over it here so search behaves like browse:
+    // total is the true match count, data is the requested page slice.
+    const results = await bookRepository.findCatalogByFuzzyTitle(search);
+    return c.json({ data: results.slice(offset, offset + limit), page, total: results.length });
+  }
+
+  // Browse: order by createdAt desc so paging is deterministic (without an
+  // ORDER BY, limit/offset returns arbitrary rows and pages can overlap/skip).
+  const data = await db
+    .select()
+    .from(bookCatalog)
+    .orderBy(desc(bookCatalog.createdAt))
+    .limit(limit)
+    .offset(offset);
   const [{ total }] = await db.select({ total: count() }).from(bookCatalog);
   return c.json({ data, page, total });
 });
