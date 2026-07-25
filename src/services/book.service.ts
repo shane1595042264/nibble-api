@@ -17,9 +17,34 @@ function startPipelineAsync(jobId: string, fileHash: string, bookId: string, mod
     } catch (err: any) {
       console.error('Processing pipeline failed:', err);
       const errorMessage = err?.message ?? 'Unknown error';
-      // Use the repository to properly update job and book status on failure
-      await processingLogRepository.failJob(jobId, errorMessage).catch(() => {});
-      await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
+      // Mark the job failed. Log (don't swallow) if the write itself fails, so a
+      // failed job-status write is traceable instead of vanishing (KAN-279).
+      await processingLogRepository.failJob(jobId, errorMessage).catch((failErr) => {
+        console.error(`[book.service] failed to mark job ${jobId} failed after pipeline error:`, failErr);
+      });
+      // Reliably set the book to 'error' via the KAN-243 net: markBookErrored
+      // retries a couple times and logs CRITICAL on final failure, and never
+      // rejects. This catch fires only for failures OUTSIDE the inner pipeline
+      // nets (catalog lookup / dynamic import throwing), where this is the ONLY
+      // thing that can rescue the book from a permanent 'processing' state.
+      try {
+        const { markBookErrored } = await import('./processing.service.js');
+        await markBookErrored(bookId, jobId);
+      } catch (importErr) {
+        // The dynamic import itself failed — one of the exact cases this catch
+        // guards. Fall back to a direct status write, logging loudly rather than
+        // swallowing, so the stuck book is at least traceable in server logs.
+        console.error(
+          `[book.service] CRITICAL: could not load markBookErrored to rescue book ${bookId} (job ${jobId}); attempting direct status write.`,
+          importErr,
+        );
+        await bookRepository.update(bookId, { processingStatus: 'error' }).catch((updateErr) => {
+          console.error(
+            `[book.service] CRITICAL: failed to set book ${bookId} to 'error' (job ${jobId}). Book may be stuck showing 'processing' — manual intervention required.`,
+            updateErr,
+          );
+        });
+      }
     }
   }, 0);
 }
