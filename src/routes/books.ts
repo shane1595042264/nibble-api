@@ -21,18 +21,18 @@ function sanitizeFilename(name: string, maxLength = 100): string {
 
 // ─── Zod schemas ───────────────────────────────────────────────────
 
-const createBookSchema = z.object({
+export const createBookSchema = z.object({
   catalogId: z.string().uuid(),
-  customTitle: z.string().optional(),
-  coverUrl: z.string().url().optional(),
+  customTitle: z.string().max(500).optional(),
+  coverUrl: z.string().url().max(2048).optional(),
 });
 
 // processingStatus and structureSource are backend-managed (processing worker writes)
 // and intentionally omitted here. .strict() makes clients get a 400 when they send
 // any unlisted field rather than having it silently stripped.
-const updateBookSchema = z.object({
-  customTitle: z.string().optional(),
-  coverUrl: z.string().url().optional(),
+export const updateBookSchema = z.object({
+  customTitle: z.string().max(500).optional(),
+  coverUrl: z.string().url().max(2048).optional(),
   lastReadAt: z.string().datetime().optional(),
   lastAccessedSectionId: z.string().uuid().optional(),
   lastAccessedScrollProgress: z.number().min(0).max(1).optional(),

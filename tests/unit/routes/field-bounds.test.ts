@@ -7,7 +7,7 @@ import {
   SECTION_TYPE_MAX,
   SECTION_EXTRACTED_TEXT_MAX,
 } from '../../../src/routes/sections.js';
-import { updateMetadataSchema } from '../../../src/routes/books.js';
+import { updateMetadataSchema, createBookSchema, updateBookSchema } from '../../../src/routes/books.js';
 import {
   chapterBoundsSchema,
   sectionBoundsSchema,
@@ -392,5 +392,40 @@ describe('books updateMetadataSchema', () => {
 
   it('rejects 101-char language', () => {
     expect(updateMetadataSchema.safeParse({ language: 'l'.repeat(101) }).success).toBe(false);
+  });
+});
+
+describe('books createBookSchema / updateBookSchema customTitle + coverUrl bounds', () => {
+  const catalogId = '00000000-0000-0000-0000-000000000000';
+
+  it('createBookSchema accepts a 500-char customTitle and 2048-char coverUrl', () => {
+    const r = createBookSchema.safeParse({
+      catalogId,
+      customTitle: 'a'.repeat(500),
+      coverUrl: 'https://x.test/' + 'a'.repeat(2048 - 'https://x.test/'.length),
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it('createBookSchema rejects a 501-char customTitle', () => {
+    expect(createBookSchema.safeParse({ catalogId, customTitle: 'a'.repeat(501) }).success).toBe(false);
+  });
+
+  it('createBookSchema rejects a coverUrl longer than 2048 chars', () => {
+    const url = 'https://x.test/' + 'a'.repeat(2049 - 'https://x.test/'.length);
+    expect(createBookSchema.safeParse({ catalogId, coverUrl: url }).success).toBe(false);
+  });
+
+  it('updateBookSchema accepts a 500-char customTitle', () => {
+    expect(updateBookSchema.safeParse({ customTitle: 'a'.repeat(500) }).success).toBe(true);
+  });
+
+  it('updateBookSchema rejects a 501-char customTitle', () => {
+    expect(updateBookSchema.safeParse({ customTitle: 'a'.repeat(501) }).success).toBe(false);
+  });
+
+  it('updateBookSchema rejects a coverUrl longer than 2048 chars', () => {
+    const url = 'https://x.test/' + 'a'.repeat(2049 - 'https://x.test/'.length);
+    expect(updateBookSchema.safeParse({ coverUrl: url }).success).toBe(false);
   });
 });
