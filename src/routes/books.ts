@@ -46,7 +46,7 @@ bookRoutes.post('/match', async (c) => {
   const body = await c.req.json();
   const schema = z.object({
     fileHash: z.string(),
-    title: z.string().optional(),
+    title: z.string().max(255).optional(),
   });
   const { fileHash, title } = schema.parse(body);
   const result = await bookService.matchBook(fileHash, title);
