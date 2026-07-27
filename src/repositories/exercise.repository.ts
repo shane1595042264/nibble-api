@@ -89,36 +89,30 @@ export const exerciseRepository = {
       metadata?: Record<string, unknown>;
     },
   ) {
-    const [existing] = await db
-      .select()
-      .from(exerciseProgress)
-      .where(
-        and(
-          eq(exerciseProgress.userId, userId),
-          eq(exerciseProgress.exerciseId, exerciseId),
-        ),
-      )
-      .limit(1);
-
-    if (existing) {
-      const { bookId: _bookId, ...updateData } = data;
-      const [updated] = await db
-        .update(exerciseProgress)
-        .set({ ...updateData, deletedAt: null })
-        .where(eq(exerciseProgress.id, existing.id))
-        .returning();
-      return updated;
-    }
-
-    const [created] = await db
+    // Atomic upsert via INSERT ... ON CONFLICT (user_id, exercise_id). Replaces the
+    // previous check-then-act (SELECT then INSERT/UPDATE), which raced the composite
+    // UNIQUE index idx_exercise_progress_unique(user_id, exercise_id): two concurrent
+    // first-writes both missed the SELECT, both took the INSERT branch, and the second
+    // threw a UNIQUE violation. Mirrors the KAN-274 settings.repository fix.
+    const { bookId: _bookId, ...updateData } = data;
+    // On conflict, do NOT overwrite bookId (matches the prior update branch which
+    // stripped it), reset deletedAt: null to un-tombstone on re-upsert, and set
+    // updatedAt explicitly — $onUpdate fires on .update() but NOT on
+    // onConflictDoUpdate, so without this findProgressModifiedSince would miss the
+    // change and break cross-device pull.
+    const [row] = await db
       .insert(exerciseProgress)
       .values({
         userId,
         exerciseId,
         ...data,
       })
+      .onConflictDoUpdate({
+        target: [exerciseProgress.userId, exerciseProgress.exerciseId],
+        set: { ...updateData, deletedAt: null, updatedAt: new Date() },
+      })
       .returning();
-    return created;
+    return row ?? null;
   },
 
   async softDeleteProgress(id: string) {
