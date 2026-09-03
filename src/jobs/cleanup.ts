@@ -57,6 +57,46 @@ export async function runCleanup() {
 }
 
 /**
+ * Reclaim every artifact keyed by one catalog's fileHash: the R2 PDF object,
+ * the R2 .nib cache object, and the pdf_files / nib_cache / book_catalog rows.
+ *
+ * R2 first, DB rows second, and only when every R2 delete succeeded. The
+ * catalog row is the sole discovery key reclaimOrphanedStorage() scans by, so
+ * dropping it while an R2 object survives strands that object forever. On a
+ * partial R2 failure this leaves all three rows intact and returns false — the
+ * hourly job then rediscovers the orphan and retries (R2 deletes are idempotent).
+ *
+ * Callers must have already established that no books row references catalogId;
+ * books.catalog_id is onDelete 'restrict', so the final delete raises Postgres
+ * 23503 otherwise.
+ *
+ * @returns true when the reclaim completed, false when it was skipped for retry.
+ */
+export async function reclaimCatalogStorage(catalogId: string, fileHash: string): Promise<boolean> {
+  const [pdfRow] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
+
+  const r2KeysToDelete = [`nibs/${fileHash}.nib.json`];
+  if (pdfRow?.r2Key) r2KeysToDelete.unshift(pdfRow.r2Key);
+
+  let allR2DeletesOk = true;
+  for (const key of r2KeysToDelete) {
+    try {
+      await storageService.deleteObject(key);
+    } catch (err) {
+      allR2DeletesOk = false;
+      console.error(`[cleanup] R2 delete failed for key=${key} catalogId=${catalogId}`, err);
+    }
+  }
+
+  if (!allR2DeletesOk) return false;
+
+  await db.delete(pdfFiles).where(eq(pdfFiles.fileHash, fileHash));
+  await db.delete(nibCache).where(eq(nibCache.fileHash, fileHash));
+  await db.delete(bookCatalog).where(eq(bookCatalog.id, catalogId));
+  return true;
+}
+
+/**
  * Find bookCatalog rows no longer referenced by any books row (including
  * soft-deleted ones — those still protect the catalog until hard-deletion)
  * and reclaim their R2 objects + DB rows. Only removes DB rows once every R2
@@ -74,30 +114,11 @@ async function reclaimOrphanedStorage(): Promise<{ reclaimed: number; skipped: n
   let skipped = 0;
 
   for (const { catalogId, fileHash } of orphans) {
-    const [pdfRow] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
-
-    const r2KeysToDelete = [`nibs/${fileHash}.nib.json`];
-    if (pdfRow?.r2Key) r2KeysToDelete.unshift(pdfRow.r2Key);
-
-    let allR2DeletesOk = true;
-    for (const key of r2KeysToDelete) {
-      try {
-        await storageService.deleteObject(key);
-      } catch (err) {
-        allR2DeletesOk = false;
-        console.error(`[cleanup] R2 delete failed for key=${key} catalogId=${catalogId}`, err);
-      }
-    }
-
-    if (!allR2DeletesOk) {
+    if (await reclaimCatalogStorage(catalogId, fileHash)) {
+      reclaimed++;
+    } else {
       skipped++;
-      continue;
     }
-
-    await db.delete(pdfFiles).where(eq(pdfFiles.fileHash, fileHash));
-    await db.delete(nibCache).where(eq(nibCache.fileHash, fileHash));
-    await db.delete(bookCatalog).where(eq(bookCatalog.id, catalogId));
-    reclaimed++;
   }
 
   return { reclaimed, skipped };

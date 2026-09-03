@@ -30,4 +30,15 @@ export const Errors = {
     new AppError('RATE_LIMITED', 'Too many requests', 429),
   badRequest: (msg: string) =>
     new AppError('BAD_REQUEST', msg, 400),
+  storageReclaimFailed: (msg = 'Storage reclaim failed; the hourly cleanup job will retry') =>
+    new AppError('STORAGE_RECLAIM_FAILED', msg, 502),
 };
+
+/**
+ * True when a driver error is a Postgres foreign-key violation (SQLSTATE 23503).
+ * Lets a handler turn an FK restrict/no-action rejection into an actionable 4xx
+ * instead of letting it fall through the global handler as an opaque 500.
+ */
+export function isForeignKeyViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23503';
+}

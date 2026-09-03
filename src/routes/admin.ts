@@ -6,7 +6,8 @@ import { db } from '../db/index.js';
 import { users, books, processingJobs, processingCharges } from '../db/schema.js';
 import { sql, count, sum, desc, eq } from 'drizzle-orm';
 import { userRepository } from '../repositories/user.repository.js';
-import { Errors } from '../lib/errors.js';
+import { Errors, isForeignKeyViolation } from '../lib/errors.js';
+import { reclaimCatalogStorage } from '../jobs/cleanup.js';
 
 export const adminRoutes = new Hono();
 
@@ -143,12 +144,42 @@ adminRoutes.put('/catalog/:id', async (c) => {
   return c.json(updated);
 });
 
-// Delete catalog entry
+// Delete catalog entry — reclaims the R2 PDF + .nib objects and the
+// pdf_files / nib_cache rows keyed by this catalog's fileHash before dropping
+// the catalog row itself. Deleting the row alone destroys the only key the
+// hourly reclaimer discovers orphans by, stranding those artifacts forever.
 adminRoutes.delete('/catalog/:id', async (c) => {
   const id = uuidParamSchema.parse(c.req.param('id'));
-  const { bookCatalog } = await import('../db/schema.js');
-  const [deleted] = await db.delete(bookCatalog).where(eq(bookCatalog.id, id)).returning({ id: bookCatalog.id });
-  if (!deleted) throw Errors.notFound('Catalog entry');
+  const catalog = await bookRepository.findCatalogById(id);
+  if (!catalog) throw Errors.notFound('Catalog entry');
+
+  // books.catalogId is onDelete 'restrict', so deleting a catalog someone still
+  // has on their shelf raises Postgres 23503 and surfaces as an opaque 500.
+  // Pre-flight the FK for an actionable 409, mirroring the createBook guard.
+  const referencingBooks = await bookRepository.countByCatalogId(id);
+  if (referencingBooks > 0) {
+    throw Errors.conflict(
+      `Catalog entry is still referenced by ${referencingBooks} book${referencingBooks === 1 ? '' : 's'} and cannot be deleted`,
+    );
+  }
+
+  let reclaimed: boolean;
+  try {
+    reclaimed = await reclaimCatalogStorage(id, catalog.fileHash);
+  } catch (err) {
+    // The pre-flight count is not atomic with the delete: a book added to a
+    // shelf in between makes the final catalog delete raise 23503. Report the
+    // real cause instead of a 500.
+    if (isForeignKeyViolation(err)) {
+      throw Errors.conflict('Catalog entry was added to a library while it was being deleted');
+    }
+    throw err;
+  }
+
+  // An R2 delete failed, so reclaimCatalogStorage left every row intact for the
+  // hourly job to retry. Nothing was deleted — don't report success.
+  if (!reclaimed) throw Errors.storageReclaimFailed();
+
   return c.json({ deleted: true });
 });
 

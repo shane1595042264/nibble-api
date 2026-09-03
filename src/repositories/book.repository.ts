@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte, sql, desc, inArray } from 'drizzle-orm';
+import { eq, and, isNull, gte, sql, desc, inArray, count } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { books, bookCatalog, chapters, sections, vocabulary } from '../db/schema.js';
 import { MAX_LIST_ROWS, warnIfCapped } from '../lib/query-guards.js';
@@ -53,6 +53,20 @@ export const bookRepository = {
       )
       .limit(1);
     return book ?? null;
+  },
+
+  /**
+   * Count every books row pointing at a catalog, soft-deleted ones included.
+   * books.catalog_id is onDelete 'restrict', which ignores deleted_at — a
+   * soft-deleted book still blocks the catalog delete (and cleanup.ts likewise
+   * treats it as protecting the catalog until it is hard-deleted).
+   */
+  async countByCatalogId(catalogId: string) {
+    const [row] = await db
+      .select({ total: count() })
+      .from(books)
+      .where(eq(books.catalogId, catalogId));
+    return row?.total ?? 0;
   },
 
   /** Restore a soft-deleted book by clearing deletedAt and resetting processing state */
