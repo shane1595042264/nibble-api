@@ -21,11 +21,21 @@ setInterval(() => {
   }
 }, 60000);
 
+// Every rateLimiter() instance gets its own namespace in the shared store.
+// Without it all limiters read/write one timestamp array per user, so a
+// long-window limiter counts unrelated traffic (spurious 429s) and a
+// short-window limiter's write-back below erases the long-window history
+// (silently defeated caps). An instance id rather than a maxRequests:windowMs
+// prefix keeps the several rateLimiter(120) registrations independent too.
+let limiterInstances = 0;
+
 export function rateLimiter(maxRequests: number = 120, windowMs: number = 60000) {
   if (windowMs > maxWindowMs) maxWindowMs = windowMs;
+  const keyPrefix = `rl${++limiterInstances}:`;
   return async (c: Context, next: Next) => {
     const user = c.get('user');
-    const key = user?.id ?? c.req.header('x-forwarded-for') ?? 'anonymous';
+    const identity = user?.id ?? c.req.header('x-forwarded-for') ?? 'anonymous';
+    const key = keyPrefix + identity;
 
     const now = Date.now();
     const entry = store.get(key) ?? { timestamps: [] };
