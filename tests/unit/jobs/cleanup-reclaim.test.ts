@@ -10,7 +10,7 @@ vi.mock('../../../src/db/index.js', () => ({ db }));
 const storage = vi.hoisted(() => ({ deleteObject: vi.fn() }));
 vi.mock('../../../src/services/storage.service.js', () => ({ storageService: storage }));
 
-const { reclaimCatalogStorage } = await import('../../../src/jobs/cleanup.js');
+const { reclaimCatalogStorage, reclaimOrphanedStorage } = await import('../../../src/jobs/cleanup.js');
 
 const CATALOG_ID = 'cat-1';
 const FILE_HASH = 'hash-abc';
@@ -80,6 +80,124 @@ describe('reclaimCatalogStorage', () => {
     // Both keys are still attempted, but no row is dropped.
     expect(storage.deleteObject).toHaveBeenCalledTimes(2);
     expect(deleted).toEqual([]);
+  });
+});
+
+/**
+ * Walk a drizzle SQL predicate and pull out the column names and bound
+ * parameters it references, so a test can assert the WHERE clause really
+ * carries the age bound instead of just asserting the mock was called.
+ */
+function inspectPredicate(predicate: unknown): { columns: string[]; params: unknown[] } {
+  const columns: string[] = [];
+  const params: unknown[] = [];
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) return node.forEach(walk);
+    const n = node as Record<string, unknown>;
+    if (n.name && n.table) columns.push(n.name as string);
+    if (n.value !== undefined && n.encoder) params.push(n.value);
+    if (n.queryChunks) walk(n.queryChunks);
+  };
+  walk((predicate as { queryChunks?: unknown }).queryChunks);
+  return { columns, params };
+}
+
+/**
+ * db.select() as a chainable builder covering all three shapes the job uses:
+ * the orphan scan (.from().leftJoin().where().limit()), the deferred count
+ * (.from().leftJoin().where(), awaited directly) and reclaimCatalogStorage's
+ * pdf_files lookup. Resolves the queued result sets in call order and records
+ * every where() argument for inspection.
+ */
+function mockSelectQueue(resultSets: unknown[][]): unknown[] {
+  const wheres: unknown[] = [];
+  db.select.mockImplementation(() => {
+    const rows = resultSets.shift() ?? [];
+    const builder: Record<string, unknown> = {
+      from: () => builder,
+      leftJoin: () => builder,
+      where: (w: unknown) => {
+        wheres.push(w);
+        return builder;
+      },
+      limit: () => Promise.resolve(rows),
+      then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+        Promise.resolve(rows).then(res, rej),
+    };
+    return builder;
+  });
+  return wheres;
+}
+
+describe('reclaimOrphanedStorage', () => {
+  beforeEach(() => {
+    db.select.mockReset();
+    db.delete.mockReset();
+    storage.deleteObject.mockReset();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  it('bounds the orphan scan by both catalog timestamps, roughly an hour back', async () => {
+    const wheres = mockSelectQueue([[], [{ total: 0 }]]);
+    const before = Date.now();
+
+    await reclaimOrphanedStorage();
+
+    const { columns, params } = inspectPredicate(wheres[0]);
+    // isNull(books.id) plus the two age bounds — without these the predicate
+    // matches an upload that is still mid-flight.
+    expect(columns).toEqual(['id', 'created_at', 'updated_at']);
+
+    const cutoffs = params.filter((v): v is Date => v instanceof Date);
+    expect(cutoffs).toHaveLength(2);
+    for (const cutoff of cutoffs) {
+      const age = before - cutoff.getTime();
+      expect(age).toBeGreaterThanOrEqual(60 * 60 * 1000);
+      expect(age).toBeLessThan(60 * 60 * 1000 + 60_000);
+    }
+  });
+
+  it('reports catalogs inside the grace period as deferred and never touches them', async () => {
+    mockSelectQueue([[], [{ total: 3 }]]);
+
+    await expect(reclaimOrphanedStorage()).resolves.toEqual({
+      reclaimed: 0,
+      skipped: 0,
+      deferred: 3,
+    });
+
+    // No R2 delete and no row delete for an in-flight upload.
+    expect(storage.deleteObject).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+  });
+
+  it('still reclaims a settled orphan and logs it by identity (KAN-131 behaviour)', async () => {
+    mockSelectQueue([
+      [{ catalogId: CATALOG_ID, fileHash: FILE_HASH, title: 'Old Book' }],
+      [{ total: 0 }],
+      [{ r2Key: PDF_KEY }],
+    ]);
+    storage.deleteObject.mockResolvedValue(undefined);
+    const deleted: string[] = [];
+    mockDeletes(deleted);
+
+    await expect(reclaimOrphanedStorage()).resolves.toEqual({
+      reclaimed: 1,
+      skipped: 0,
+      deferred: 0,
+    });
+    expect(deleted).toEqual(['pdf_files', 'nib_cache', 'book_catalog']);
+
+    // Hard deletes with no other audit trail must be identifiable after the fact.
+    const logged = (console.log as unknown as { mock: { calls: string[][] } }).mock.calls
+      .map((c) => c[0])
+      .join(' | ');
+    expect(logged).toContain(CATALOG_ID);
+    expect(logged).toContain(FILE_HASH);
+    expect(logged).toContain('Old Book');
   });
 });
 

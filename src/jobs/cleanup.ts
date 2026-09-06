@@ -1,10 +1,26 @@
 import { db } from '../db/index.js';
 import { books, chapters, sections, vocabulary, exerciseProgress, bookCatalog, pdfFiles, nibCache } from '../db/schema.js';
-import { lt, isNotNull, and, eq, isNull } from 'drizzle-orm';
+import { lt, gte, isNotNull, and, or, eq, isNull, count } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ORPHAN_RECLAIMS_PER_RUN = 100;
+/**
+ * How long a bookCatalog row must have been settled (neither created nor
+ * touched) before it is eligible for orphan reclaim.
+ *
+ * handleUpload() writes the catalog row BEFORE uploading the file to R2 and
+ * before creating the first books row, so for the whole span of an upload the
+ * catalog is indistinguishable from a real orphan. Reclaiming inside that
+ * window deletes the bytes the request just uploaded and makes the books
+ * insert raise Postgres 23503 (books.catalog_id is onDelete 'restrict').
+ *
+ * An hour is far longer than any upload the platform will keep a request open
+ * for, and costs nothing: the KAN-131 case this job exists for (last books row
+ * hard-deleted after the 30-day window) has a catalog row that is months old,
+ * so it is still reclaimed on the very next tick.
+ */
+const ORPHAN_GRACE_PERIOD_MS = 60 * 60 * 1000;
 
 /**
  * Hard-delete records where deleted_at is older than 30 days.
@@ -49,8 +65,11 @@ export async function runCleanup() {
   );
 
   try {
-    const { reclaimed, skipped } = await reclaimOrphanedStorage();
-    console.log(`Cleanup completed at ${new Date().toISOString()} — orphans reclaimed: ${reclaimed}, skipped: ${skipped}`);
+    const { reclaimed, skipped, deferred } = await reclaimOrphanedStorage();
+    console.log(
+      `Cleanup completed at ${new Date().toISOString()} — orphans reclaimed: ${reclaimed}, ` +
+        `skipped (R2 failure, will retry): ${skipped}, deferred (within grace period): ${deferred}`,
+    );
   } catch (err) {
     console.error('[cleanup] reclaimOrphanedStorage failed:', err);
   }
@@ -97,29 +116,83 @@ export async function reclaimCatalogStorage(catalogId: string, fileHash: string)
 }
 
 /**
- * Find bookCatalog rows no longer referenced by any books row (including
- * soft-deleted ones — those still protect the catalog until hard-deletion)
- * and reclaim their R2 objects + DB rows. Only removes DB rows once every R2
+ * Find bookCatalog rows that are no longer referenced by any books row
+ * (including soft-deleted ones — those still protect the catalog until
+ * hard-deletion) AND have been settled for at least ORPHAN_GRACE_PERIOD_MS,
+ * then reclaim their R2 objects + DB rows. Only removes DB rows once every R2
  * delete for the orphan succeeded, so a failed run is retried next pass.
+ *
+ * The age bound is what separates a real orphan from an upload in progress.
+ * Both timestamps are checked, because there are two ways a catalog can be
+ * transiently unreferenced while a request is mid-flight:
+ *   - a brand-new catalog (handleUpload creates it, then uploads to R2, then
+ *     inserts the books row) — guarded by created_at;
+ *   - an existing, currently unreferenced catalog being re-uploaded, where the
+ *     userCount bump touches the row before the books insert — guarded by
+ *     updated_at, which $onUpdate refreshes on that write.
+ *
+ * On the marketplace question this predicate is deliberate, not incidental:
+ * handleUpload() is the only path in this codebase that creates a catalog row,
+ * and it always goes on to create a books row, so a zero-reference catalog is
+ * only ever an in-flight upload or a genuinely abandoned one. GET /admin/catalog
+ * and add-to-shelf can therefore keep offering every catalog row. If a curation
+ * endpoint that creates catalog entries ahead of demand is ever added, those
+ * rows WOULD be reclaimed an hour later and this predicate must be revisited.
  */
-async function reclaimOrphanedStorage(): Promise<{ reclaimed: number; skipped: number }> {
+export async function reclaimOrphanedStorage(): Promise<{
+  reclaimed: number;
+  skipped: number;
+  deferred: number;
+}> {
+  const settledBefore = new Date(Date.now() - ORPHAN_GRACE_PERIOD_MS);
+  // Built fresh per query rather than shared, so the two builders below never
+  // hold a reference to the same predicate instance.
+  const unreferenced = () => isNull(books.id);
+
   const orphans = await db
-    .select({ catalogId: bookCatalog.id, fileHash: bookCatalog.fileHash })
+    .select({ catalogId: bookCatalog.id, fileHash: bookCatalog.fileHash, title: bookCatalog.title })
     .from(bookCatalog)
     .leftJoin(books, eq(books.catalogId, bookCatalog.id))
-    .where(isNull(books.id))
+    .where(
+      and(
+        unreferenced(),
+        lt(bookCatalog.createdAt, settledBefore),
+        lt(bookCatalog.updatedAt, settledBefore),
+      ),
+    )
     .limit(MAX_ORPHAN_RECLAIMS_PER_RUN);
+
+  // Counted separately rather than inferred, so the log distinguishes "nothing
+  // to do" from "held back by the grace period" without a second guess.
+  const [deferredRow] = await db
+    .select({ total: count() })
+    .from(bookCatalog)
+    .leftJoin(books, eq(books.catalogId, bookCatalog.id))
+    .where(
+      and(
+        unreferenced(),
+        or(
+          gte(bookCatalog.createdAt, settledBefore),
+          gte(bookCatalog.updatedAt, settledBefore),
+        ),
+      ),
+    );
 
   let reclaimed = 0;
   let skipped = 0;
 
-  for (const { catalogId, fileHash } of orphans) {
+  for (const { catalogId, fileHash, title } of orphans) {
+    // Identify every reclaim in the log. These deletes are hard and there is no
+    // other audit trail, so a bare count makes a future incident undiagnosable.
+    const identity = `catalogId=${catalogId} fileHash=${fileHash} title=${JSON.stringify(title)}`;
     if (await reclaimCatalogStorage(catalogId, fileHash)) {
       reclaimed++;
+      console.log(`[cleanup] reclaimed orphaned catalog ${identity}`);
     } else {
       skipped++;
+      console.warn(`[cleanup] deferred reclaim after R2 failure, will retry ${identity}`);
     }
   }
 
-  return { reclaimed, skipped };
+  return { reclaimed, skipped, deferred: deferredRow?.total ?? 0 };
 }
