@@ -6,7 +6,7 @@ import { db } from '../db/index.js';
 import { users, books, processingJobs, processingCharges } from '../db/schema.js';
 import { sql, count, sum, desc, eq } from 'drizzle-orm';
 import { userRepository } from '../repositories/user.repository.js';
-import { Errors, isForeignKeyViolation } from '../lib/errors.js';
+import { Errors, isForeignKeyViolation, isUniqueViolation } from '../lib/errors.js';
 import { reclaimCatalogStorage } from '../jobs/cleanup.js';
 
 export const adminRoutes = new Hono();
@@ -194,11 +194,44 @@ adminRoutes.post('/catalog/:id/add-to-shelf', async (c) => {
   const existing = await bookRepository.findByUserIdAndCatalogId(user.id, catalogId);
   if (existing) return c.json({ book: existing, alreadyExists: true });
 
-  const book = await bookRepository.create({
-    userId: user.id,
-    catalogId,
-    processingStatus: 'complete',
-  });
+  // A delete is a soft delete, and idx_books_user_catalog covers soft-deleted
+  // rows too, so the (user, catalog) slot is still occupied after a delete —
+  // inserting here would raise 23505. Restore the tombstoned row instead, the
+  // same way the upload path does (book.service.ts handleUpload).
+  //
+  // Unlike that path we leave the book's chapters/sections soft-deleted rather
+  // than clearing them: those tombstones have already synced to the user's
+  // other devices, and add-to-shelf runs no pipeline to rebuild the structure.
+  // A book restored this way therefore lands in exactly the state a first-time
+  // add-to-shelf produces — a 'complete' book row carrying no structure.
+  const deleted = await bookRepository.findDeletedByUserIdAndCatalogId(user.id, catalogId);
+  if (deleted) {
+    const restored = await bookRepository.restore(deleted.id, { processingStatus: 'complete' });
+    // restore() is genuinely nullable — the UPDATE ... returning() yields no row
+    // if the target vanished between the find and the update. Fail loud rather
+    // than shipping { book: null } to a client that dereferences book.id.
+    if (!restored) throw Errors.conflict('Book was removed while it was being restored');
+    // No userCount bump: this user was already counted when they first added it.
+    return c.json({ book: restored, alreadyExists: false, restored: true });
+  }
+
+  let book;
+  try {
+    book = await bookRepository.create({
+      userId: user.id,
+      catalogId,
+      processingStatus: 'complete',
+    });
+  } catch (err) {
+    // Lost a race: a concurrent request inserted the row between our lookups
+    // and this insert. Re-read and answer idempotently instead of 500ing.
+    if (!isUniqueViolation(err)) throw err;
+    const raced = await bookRepository.findByUserIdAndCatalogId(user.id, catalogId);
+    if (raced) return c.json({ book: raced, alreadyExists: true });
+    throw Errors.conflict('This book is already on your shelf');
+  }
+
+  await bookRepository.incrementCatalogUserCount(catalogId);
   return c.json({ book, alreadyExists: false }, 201);
 });
 

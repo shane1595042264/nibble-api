@@ -9,6 +9,8 @@ const bookRepo = vi.hoisted(() => ({
   create: vi.fn(),
   findCatalogByHash: vi.fn(),
   updateCatalog: vi.fn(),
+  touchCatalog: vi.fn(),
+  incrementCatalogUserCount: vi.fn(),
   findDeletedByUserIdAndCatalogId: vi.fn(),
   restore: vi.fn(),
   update: vi.fn(),
@@ -98,6 +100,8 @@ describe('bookService.handleUpload re-upload-after-delete restore edge', () => {
   beforeEach(() => {
     bookRepo.findCatalogByHash.mockReset();
     bookRepo.updateCatalog.mockReset();
+    bookRepo.touchCatalog.mockReset().mockResolvedValue(undefined);
+    bookRepo.incrementCatalogUserCount.mockReset().mockResolvedValue(undefined);
     bookRepo.findByUserIdAndCatalogId.mockReset();
     bookRepo.findDeletedByUserIdAndCatalogId.mockReset();
     bookRepo.restore.mockReset();
@@ -145,6 +149,8 @@ describe('startPipelineAsync failure net (KAN-279)', () => {
   beforeEach(() => {
     bookRepo.findCatalogByHash.mockReset().mockResolvedValue(CAT);
     bookRepo.updateCatalog.mockReset().mockResolvedValue(undefined);
+    bookRepo.touchCatalog.mockReset().mockResolvedValue(undefined);
+    bookRepo.incrementCatalogUserCount.mockReset().mockResolvedValue(undefined);
     bookRepo.update.mockReset().mockResolvedValue(undefined);
     bookRepo.findByUserIdAndCatalogId.mockReset();
     db.select.mockReset();

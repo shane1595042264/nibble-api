@@ -42,3 +42,13 @@ export const Errors = {
 export function isForeignKeyViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23503';
 }
+
+/**
+ * True when a driver error is a Postgres unique-violation (SQLSTATE 23505).
+ * idx_books_user_catalog spans soft-deleted rows too, so any handler that
+ * inserts a books row can lose a race with a concurrent insert; mapping the
+ * code to a real 409 keeps that from surfacing as an opaque 500.
+ */
+export function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23505';
+}

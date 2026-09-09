@@ -254,4 +254,33 @@ export const bookRepository = {
       .returning();
     return updated ?? null;
   },
+
+  /**
+   * Atomically bump a catalog's adoption counter. Read-modify-write from JS
+   * (SELECT userCount, then UPDATE to userCount + 1) silently loses one of two
+   * concurrent adds of the same book, so the increment is expressed in SQL.
+   */
+  async incrementCatalogUserCount(id: string) {
+    const [updated] = await db
+      .update(bookCatalog)
+      .set({ userCount: sql`${bookCatalog.userCount} + 1` })
+      .where(eq(bookCatalog.id, id))
+      .returning();
+    return updated ?? null;
+  },
+
+  /**
+   * Refresh a catalog row's updatedAt without changing any field.
+   * reclaimOrphanedStorage (jobs/cleanup.ts) treats bookCatalog.updatedAt as
+   * the marker that separates an in-flight upload against a currently
+   * unreferenced catalog from a genuinely abandoned one, so handleUpload has
+   * to touch the row before it starts uploading to R2 — even when it has
+   * nothing to write yet.
+   */
+  async touchCatalog(id: string) {
+    await db
+      .update(bookCatalog)
+      .set({ updatedAt: new Date() })
+      .where(eq(bookCatalog.id, id));
+  },
 };

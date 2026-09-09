@@ -134,12 +134,20 @@ export const bookService = {
   ) {
     // 1. Check if catalog entry exists for this hash
     let catalogEntry = await bookRepository.findCatalogByHash(fileHash);
+    const catalogExisted = catalogEntry !== null;
 
     if (catalogEntry) {
-      // Increment user count
-      await bookRepository.updateCatalog(catalogEntry.id, {
-        userCount: catalogEntry.userCount + 1,
-      });
+      // Touch the row without counting a user yet — the adoption bump belongs
+      // to the truly-new-book branch below, so that re-uploading a book you
+      // already own (or restoring one you deleted) stops inflating the count.
+      //
+      // The write itself must stay HERE, before the R2 upload. reclaimOrphanedStorage
+      // (jobs/cleanup.ts) uses bookCatalog.updatedAt to tell an in-flight re-upload
+      // against a currently-unreferenced catalog from a genuine orphan; a catalog
+      // whose books rows were all hard-deleted is older than the grace period on
+      // both timestamps, so dropping this touch would let the hourly job delete the
+      // catalog row and its R2 objects mid-upload.
+      await bookRepository.touchCatalog(catalogEntry.id);
     } else {
       // 2. Look up metadata from Google Books (PDF-friendly metadata source)
       const { metadataService } = await import('./metadata.service.js');
@@ -286,6 +294,12 @@ export const bookService = {
       catalogId: catalogEntry.id,
       processingStatus: 'pending',
     });
+
+    // One more reader of this catalog. Skipped when we created the catalog just
+    // above: userCount defaults to 1, which already counts this user.
+    if (catalogExisted) {
+      catalogEntry = await bookRepository.incrementCatalogUserCount(catalogEntry.id) ?? catalogEntry;
+    }
 
     // Atomically create processing job for the new book
     const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
