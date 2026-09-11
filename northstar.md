@@ -8,6 +8,21 @@
 
 The plan below was written 2026-03-10 as the initial build-out. Most of it shipped. This section overrides anything below it when they conflict. Add a dated bullet here whenever the user's intent changes — do NOT silently delete the older sections; just note they're superseded.
 
+### 2026-09-11 — Section `isRead` conflict resolution is no longer monotonic (KAN-299)
+
+Line 1272 below states the original rule: *"If server has `isRead=true` and client has `isRead=false`, server wins regardless of timestamp."* That rule is **superseded** — it made the "Mark as Unread" toolbar action impossible to persist for any signed-in user.
+
+`resolveConflict()` in `src/services/sync.service.ts` now takes a third `clientIsNewer` argument:
+
+- **Client row strictly newer** (`clientTime > serverTime`) → read-state is **last-write-wins**. An explicit `isRead: false` wins and `readAt` clears to `null` with it.
+- **Server newer, or timestamps equal** (genuinely concurrent) → the monotonic **true-wins** bias is unchanged. This is what still stops a stale device from un-reading a section.
+
+`scrollProgress` max-wins is untouched and remains genuinely monotonic.
+
+Why it mattered: the old OR not only rejected the client's `false`, it wrote `true` back to the row, which tripped `$onUpdate` on `sections.updated_at` and pushed the flipped row into the *same* response's `serverChanges` — so the client re-applied `isRead: true` over its own local `false` within one tick. That fully neutered the KAN-240 client-side fix and left books stuck with every section read but `completedAt = null`.
+
+Regression guard: `tests/unit/services/sync-conflict.test.ts`. There were previously zero tests on this resolver, which is how KAN-240's fix could be silently undone server-side.
+
 ### 2026-06-10 — Legacy AI proxy routes removed (KAN-210)
 
 The three original AI proxy routes — `POST /api/ai/word-context`, `POST /api/ai/translate`, `POST /api/ai/explain` — have been deleted from `src/routes/ai.ts` along with their service methods (`wordContext`, `translate`, `explain`) in `src/services/ai.service.ts`. They had no callers in either repo, lacked the `c.req.raw.signal` + `isClientAbort()` handling every sibling route now has, and represented an authenticated cost-burn surface with no abort path.

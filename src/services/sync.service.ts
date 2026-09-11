@@ -107,20 +107,33 @@ function pickFields(entity: Record<string, unknown>, fields: readonly string[]):
 
 /**
  * Resolve reading-progress conflicts for sections.
- * - isRead=true always wins over false, regardless of timestamp.
+ * - isRead: the strictly-newer client wins (last-write-wins), so an explicit
+ *   un-read propagates. Otherwise true wins over false.
  * - Higher scrollProgress always wins.
  * Returns a merged partial that should be applied on top of the winning entity.
  */
-function resolveConflict(
+export function resolveConflict(
   clientEntity: SyncEntity,
   serverEntity: Record<string, unknown>,
+  clientIsNewer: boolean,
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = {};
 
-  // isRead: true wins
   const clientIsRead = Boolean(clientEntity.isRead);
   const serverIsRead = Boolean(serverEntity.isRead);
-  if (clientIsRead || serverIsRead) {
+
+  if (clientIsNewer) {
+    // The client row is authoritatively newer, so read-state is last-write-wins
+    // — NOT monotonic. The unconditional OR below folded an explicit
+    // "Mark as Unread" back to true and echoed the flipped row out in the same
+    // response's serverChanges, so the un-read could never survive a sync tick
+    // on any device (KAN-299). readAt clears with it.
+    merged.isRead = clientIsRead;
+    merged.readAt = clientIsRead ? clientEntity.readAt ?? new Date() : null;
+  } else if (clientIsRead || serverIsRead) {
+    // Server row is newer, or the two are concurrent (equal timestamps) — the
+    // client has no fresher claim, so keep the monotonic true-wins bias.
+    // This is what stops a stale device from un-reading a section.
     merged.isRead = true;
     // Preserve the readAt from whichever side set isRead=true
     if (clientIsRead && !serverIsRead) {
@@ -317,11 +330,14 @@ export const syncService = {
           const clientTime = new Date(clientSection.updatedAt).getTime();
           const serverTime = new Date(server.updatedAt).getTime();
 
-          // Always resolve reading-progress conflicts regardless of timestamp
-          const progressMerge = resolveConflict(clientSection, server);
+          // Always resolve reading-progress conflicts, but let the resolver know
+          // which side is newer so an explicit un-read from a fresher client can win.
+          const progressMerge = resolveConflict(clientSection, server, clientTime > serverTime);
 
           if (clientTime > serverTime) {
             // Client wins on general fields, but merge reading progress.
+            // progressMerge stays spread AFTER data: on this path it echoes the
+            // client's own isRead/readAt, and scrollProgress max-wins must land last.
             // Strip bookId / chapterId to prevent reparenting.
             const { id, bookId, chapterId, createdAt, updatedAt, ...data } = coerced;
             if (clientSection.deletedAt) {
