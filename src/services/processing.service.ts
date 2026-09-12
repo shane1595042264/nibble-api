@@ -508,21 +508,32 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
     // ── Stage 4: Cover (85-95%) ──────────────────────────────────
     await processingLogRepository.updateJobProgress(jobId, 85, 'cover');
     const catalog = await bookRepository.findCatalogByHash(fileHash);
-    if (catalog && !catalog.coverUrl && book.coverImage) {
-      const mime = book.coverMimeType || 'image/jpeg';
-      const coverBase64 = `data:${mime};base64,${book.coverImage.toString('base64')}`;
-      await bookRepository.updateCatalog(catalog.id, {
-        coverUrl: coverBase64,
-        // Backfill title/author from EPUB metadata if the user accepted the default
-        title: catalog.title && catalog.title !== 'Untitled' ? catalog.title : book.title,
-        author: catalog.author ?? book.author ?? undefined,
+    if (catalog) {
+      // EPUB uploads send totalPages: 0 and rely on this backfill. The chapter
+      // count is known whether or not a cover was found, so it must NOT live
+      // inside the cover branch — do one patch and add the cover to it only
+      // when there is a new one to store.
+      const patch: Parameters<typeof bookRepository.updateCatalog>[1] = {
         totalPages: book.chapters.length,
-      });
-      await processingLogRepository.append(jobId, 'cover', 'Cover extracted from EPUB metadata');
-    } else if (catalog && !catalog.coverUrl) {
-      await processingLogRepository.append(jobId, 'cover', 'EPUB has no cover image — skipping', 'warn');
+      };
+      // Backfill title/author from EPUB metadata if the user accepted the default
+      if (!catalog.title || catalog.title === 'Untitled') patch.title = book.title;
+      if (!catalog.author && book.author) patch.author = book.author;
+      if (!catalog.coverUrl && book.coverImage) {
+        const mime = book.coverMimeType || 'image/jpeg';
+        patch.coverUrl = `data:${mime};base64,${book.coverImage.toString('base64')}`;
+      }
+      await bookRepository.updateCatalog(catalog.id, patch);
+
+      if (patch.coverUrl) {
+        await processingLogRepository.append(jobId, 'cover', 'Cover extracted from EPUB metadata');
+      } else if (!catalog.coverUrl) {
+        await processingLogRepository.append(jobId, 'cover', 'EPUB has no cover image — skipping', 'warn');
+      } else {
+        await processingLogRepository.append(jobId, 'cover', 'Cover already exists — skipping');
+      }
     } else {
-      await processingLogRepository.append(jobId, 'cover', 'Cover already exists — skipping');
+      await processingLogRepository.append(jobId, 'cover', 'No catalog entry for this file — skipping cover and page count', 'warn');
     }
     await processingLogRepository.updateJobProgress(jobId, 95, 'cover');
 

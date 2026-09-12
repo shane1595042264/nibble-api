@@ -56,7 +56,12 @@ processingRoutes.post('/start', async (c) => {
     return c.json({ jobId: job.id, free: true });
   }
 
-  // Regular users pay via Stripe
+  // Regular users pay via Stripe. createPaymentIntent rejects a 0-page catalog
+  // with a 500, so bail out first — otherwise we leave a zero-cost job row
+  // behind and strand the book on processingStatus 'pending'.
+  if (!catalog.totalPages || catalog.totalPages <= 0) {
+    throw Errors.badRequest('Book has no page count yet — wait for processing to finish before paying');
+  }
   const job = await billingRepository.createJob({
     fileHash: catalog.fileHash,
     userId: user.id,
