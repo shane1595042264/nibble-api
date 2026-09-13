@@ -74,9 +74,14 @@ export const processingLogRepository = {
    * Atomically claim a failed job for retry by transitioning it to 'superseded'.
    * Returns the row on a successful claim, null if another caller already won
    * the race or the job is not in 'failed' state for this user.
+   *
+   * 'superseded' is terminal — nothing transitions a job back out of it — so the
+   * caller must run this inside the same transaction as the replacement insert.
+   * Committing the claim first and failing the insert afterwards burns the
+   * book's only retry token permanently (KAN-302).
    */
-  async claimFailedForRetry(jobId: string, userId: string) {
-    const [claimed] = await db
+  async claimFailedForRetry(jobId: string, userId: string, executor: Pick<typeof db, 'update'> = db) {
+    const [claimed] = await executor
       .update(processingJobs)
       .set({ status: 'superseded' })
       .where(
@@ -90,9 +95,16 @@ export const processingLogRepository = {
     return claimed ?? null;
   },
 
-  /** Find an active (pending or processing) job for a given file hash. */
-  async findActiveJobByFileHash(fileHash: string) {
-    const [job] = await db
+  /**
+   * Find an active (pending or processing) job for a given file hash.
+   *
+   * idx_processing_jobs_active_file_hash is keyed on file_hash alone and is not
+   * user-scoped, and file_hash is content-addressed (shared across users for
+   * catalog dedup), so any active job for this file — whoever owns it — blocks
+   * a new insert. Call this inside the inserting transaction.
+   */
+  async findActiveJobByFileHash(fileHash: string, executor: Pick<typeof db, 'select'> = db) {
+    const [job] = await executor
       .select()
       .from(processingJobs)
       .where(

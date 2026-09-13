@@ -11,11 +11,26 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { sectionRepository } from '../repositories/section.repository.js';
 import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
-import { AppError, Errors } from '../lib/errors.js';
+import { AppError, Errors, isUniqueViolation } from '../lib/errors.js';
 import { hasFreeAiAccess } from '../lib/billing-access.js';
 import { assertUuidPathParam } from '../lib/query-guards.js';
 
 export const processingRoutes = new Hono();
+
+// idx_processing_jobs_active_file_hash is a partial unique index on file_hash
+// alone — not user-scoped — and file_hash is content-addressed, so an active job
+// started by ANY user for the same file blocks this insert. Turn the resulting
+// 23505 into an actionable 409 instead of an opaque 500 (KAN-302).
+const ACTIVE_JOB_CONFLICT = 'This file is already being processed — it will finish shortly, then Retry will work';
+
+async function createJobOrConflict(data: Parameters<typeof billingRepository.createJob>[0]) {
+  try {
+    return await billingRepository.createJob(data);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    throw Errors.conflict(ACTIVE_JOB_CONFLICT);
+  }
+}
 
 // Start AI processing for an existing book (triggers payment or free bypass)
 processingRoutes.post('/start', async (c) => {
@@ -45,7 +60,7 @@ processingRoutes.post('/start', async (c) => {
 
   // Free users bypass Stripe
   if (hasFreeAiAccess(user)) {
-    const job = await billingRepository.createJob({
+    const job = await createJobOrConflict({
       fileHash: catalog.fileHash,
       userId: user.id,
       status: 'pending',
@@ -62,7 +77,7 @@ processingRoutes.post('/start', async (c) => {
   if (!catalog.totalPages || catalog.totalPages <= 0) {
     throw Errors.badRequest('Book has no page count yet — wait for processing to finish before paying');
   }
-  const job = await billingRepository.createJob({
+  const job = await createJobOrConflict({
     fileHash: catalog.fileHash,
     userId: user.id,
     status: 'pending',
@@ -97,11 +112,52 @@ processingRoutes.post('/:jobId/retry', async (c) => {
   const jobId = c.req.param('jobId');
   assertUuidPathParam(jobId, 'jobId');
 
-  // Atomic claim: only one concurrent /retry for this jobId wins. Flipping the
-  // source row out of 'failed' is the canonical mutex — re-reads tell us why
-  // we lost (missing/unowned vs already retried).
-  const claimed = await processingLogRepository.claimFailedForRetry(jobId, user.id);
-  if (!claimed) {
+  // Claim + deletes + insert all run in ONE transaction. The claim flips the
+  // source row out of 'failed', which is both the mutex against a concurrent
+  // /retry and a terminal state — so if anything below it fails, the claim has
+  // to roll back with it or the book is left with a job that can never be
+  // retried again (KAN-302).
+  let outcome: { kind: 'claim-failed' } | { kind: 'no-book' } | { kind: 'created'; newJob: typeof processingJobs.$inferSelect; bookId: string; fileHash: string };
+  try {
+    outcome = await db.transaction(async (tx) => {
+      const claimed = await processingLogRepository.claimFailedForRetry(jobId, user.id, tx);
+      if (!claimed) return { kind: 'claim-failed' as const };
+      if (!claimed.bookId) return { kind: 'no-book' as const };
+
+      const book = await bookRepository.findById(claimed.bookId);
+      if (!book) throw Errors.notFound('Book');
+
+      // idx_processing_jobs_active_file_hash is global, not user-scoped, so
+      // another user's in-flight job for this same content-addressed file would
+      // make the insert below raise 23505. Bail out before we spend the claim.
+      const active = await processingLogRepository.findActiveJobByFileHash(claimed.fileHash, tx);
+      if (active) throw Errors.conflict(ACTIVE_JOB_CONFLICT);
+
+      // Soft-delete old chapters/sections from the failed attempt so sync ships
+      // deletedAt tombstones to other devices instead of leaving them with stale
+      // structure that they could resurrect on their next push (KAN-229 / KAN-254).
+      await sectionRepository.softDeleteByBookId(book.id, tx);
+      await chapterRepository.softDeleteByBookId(book.id, tx);
+
+      // Create a new processing job
+      const [createdJob] = await tx.insert(processingJobs).values({
+        fileHash: claimed.fileHash,
+        userId: user.id,
+        bookId: book.id,
+        status: 'pending',
+      }).returning();
+
+      return { kind: 'created' as const, newJob: createdJob, bookId: book.id, fileHash: claimed.fileHash };
+    });
+  } catch (err) {
+    // The pre-check above can still lose to an insert that committed after our
+    // select. The tx (claim included) is already rolled back at this point, so
+    // the job is back in 'failed' and the user's Retry button still works.
+    if (!isUniqueViolation(err)) throw err;
+    throw Errors.conflict(ACTIVE_JOB_CONFLICT);
+  }
+
+  if (outcome.kind === 'claim-failed') {
     const existing = await processingLogRepository.getJob(jobId);
     if (!existing || existing.userId !== user.id) throw Errors.notFound('Processing job');
     if (existing.status === 'failed') {
@@ -114,44 +170,23 @@ processingRoutes.post('/:jobId/retry', async (c) => {
     return c.json({ error: 'Only failed jobs can be retried' }, 400);
   }
 
-  if (!claimed.bookId) {
+  if (outcome.kind === 'no-book') {
     return c.json({ error: 'No book associated with this job' }, 400);
   }
 
-  const book = await bookRepository.findById(claimed.bookId);
-  if (!book) throw Errors.notFound('Book');
-
-  // Wrap deletes + insert in a transaction to prevent data loss if any step fails
-  const { newJob } = await db.transaction(async (tx) => {
-    // Soft-delete old chapters/sections from the failed attempt so sync ships
-    // deletedAt tombstones to other devices instead of leaving them with stale
-    // structure that they could resurrect on their next push (KAN-229 / KAN-254).
-    await sectionRepository.softDeleteByBookId(book.id, tx);
-    await chapterRepository.softDeleteByBookId(book.id, tx);
-
-    // Create a new processing job
-    const [createdJob] = await tx.insert(processingJobs).values({
-      fileHash: claimed.fileHash,
-      userId: user.id,
-      bookId: book.id,
-      status: 'pending',
-    }).returning();
-
-    return { newJob: createdJob };
-  });
-
-  await bookRepository.update(book.id, { processingStatus: 'processing' });
+  const { newJob, bookId, fileHash } = outcome;
+  await bookRepository.update(bookId, { processingStatus: 'processing' });
 
   // Fire-and-forget pipeline
   setTimeout(async () => {
     try {
       const { processingService } = await import('../services/processing.service.js');
-      await processingService.orchestratePipeline(newJob.id, claimed.fileHash, book.id);
+      await processingService.orchestratePipeline(newJob.id, fileHash, bookId);
     } catch (err: any) {
       console.error('Retry processing pipeline failed:', err);
       const errorMessage = err?.message ?? 'Unknown error';
       await processingLogRepository.failJob(newJob.id, errorMessage).catch(() => {});
-      await bookRepository.update(book.id, { processingStatus: 'error' }).catch(() => {});
+      await bookRepository.update(bookId, { processingStatus: 'error' }).catch(() => {});
     }
   }, 0);
 
