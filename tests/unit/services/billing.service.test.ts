@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // ─── Mocks (hoisted so the factories can reference the shared fns) ───────────
-const { constructEventMock } = vi.hoisted(() => ({ constructEventMock: vi.fn() }));
+const { constructEventMock, refundsCreateMock } = vi.hoisted(() => ({
+  constructEventMock: vi.fn(),
+  refundsCreateMock: vi.fn(),
+}));
 
 vi.mock('stripe', () => {
   class Stripe {
     webhooks = { constructEvent: constructEventMock };
+    refunds = { create: refundsCreateMock };
     static errors = { StripeInvalidRequestError: class StripeInvalidRequestError extends Error {} };
   }
   return { default: Stripe };
@@ -57,6 +61,7 @@ const repo = vi.hoisted(() => ({
   updateJobStatus: vi.fn(),
   findChargeByPaymentIntentId: vi.fn(),
   updateChargeStatus: vi.fn(),
+  findJobById: vi.fn(),
 }));
 vi.mock('../../../src/repositories/billing.repository.js', () => ({ billingRepository: repo }));
 
@@ -165,5 +170,113 @@ describe('billingService.handleWebhook — reprocess after transient failure', (
 
     expect(repo.updateJobStatus).toHaveBeenCalledWith('job_1', { paid: true });
     expect(dbState.row.status).toBe('processed');
+  });
+});
+
+// ─── Failure refunds (KAN-303) ──────────────────────────────────────────────
+describe('billingService.refund — idempotency', () => {
+  beforeEach(() => {
+    refundsCreateMock.mockReset();
+    repo.findChargeByPaymentIntentId.mockReset();
+    repo.updateChargeStatus.mockReset();
+    refundsCreateMock.mockResolvedValue({ id: 're_1' });
+    repo.updateChargeStatus.mockResolvedValue({ id: 'charge_1', status: 'refunded' });
+  });
+
+  it('refunds a paid charge and flips the charge row to refunded', async () => {
+    repo.findChargeByPaymentIntentId.mockResolvedValue({ id: 'charge_1', status: 'paid' });
+
+    await billingService.refund('pi_1');
+
+    expect(refundsCreateMock).toHaveBeenCalledTimes(1);
+    expect(refundsCreateMock).toHaveBeenCalledWith(
+      { payment_intent: 'pi_1' },
+      { idempotencyKey: 'refund:pi_1' },
+    );
+    expect(repo.updateChargeStatus).toHaveBeenCalledWith('charge_1', { status: 'refunded' });
+  });
+
+  it('does not hit Stripe a second time once the charge is already refunded', async () => {
+    repo.findChargeByPaymentIntentId.mockResolvedValue({ id: 'charge_1', status: 'refunded' });
+
+    await billingService.refund('pi_1');
+
+    expect(refundsCreateMock).not.toHaveBeenCalled();
+    expect(repo.updateChargeStatus).not.toHaveBeenCalled();
+  });
+
+  it('still refunds when no charge row exists, guarded only by the idempotency key', async () => {
+    repo.findChargeByPaymentIntentId.mockResolvedValue(null);
+
+    await billingService.refund('pi_orphan');
+
+    expect(refundsCreateMock).toHaveBeenCalledWith(
+      { payment_intent: 'pi_orphan' },
+      { idempotencyKey: 'refund:pi_orphan' },
+    );
+    expect(repo.updateChargeStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('billingService.refundFailedJob', () => {
+  beforeEach(() => {
+    refundsCreateMock.mockReset();
+    repo.findJobById.mockReset();
+    repo.findChargeByPaymentIntentId.mockReset();
+    repo.updateChargeStatus.mockReset();
+    refundsCreateMock.mockResolvedValue({ id: 're_1' });
+    repo.updateChargeStatus.mockResolvedValue({ id: 'charge_1', status: 'refunded' });
+  });
+
+  it('refunds exactly once with the payment intent on the job row', async () => {
+    repo.findJobById.mockResolvedValue({ id: 'job_1', stripePaymentIntentId: 'pi_1' });
+    repo.findChargeByPaymentIntentId.mockResolvedValue({ id: 'charge_1', status: 'paid' });
+
+    await billingService.refundFailedJob('job_1');
+
+    expect(refundsCreateMock).toHaveBeenCalledTimes(1);
+    expect(refundsCreateMock).toHaveBeenCalledWith(
+      { payment_intent: 'pi_1' },
+      { idempotencyKey: 'refund:pi_1' },
+    );
+  });
+
+  it('attempts only one refund per payment intent when the same job fails twice', async () => {
+    repo.findJobById.mockResolvedValue({ id: 'job_1', stripePaymentIntentId: 'pi_1' });
+    // First failure: charge is still 'paid'. Second failure: the row the first
+    // refund wrote back, i.e. 'refunded'.
+    repo.findChargeByPaymentIntentId
+      .mockResolvedValueOnce({ id: 'charge_1', status: 'paid' })
+      .mockResolvedValueOnce({ id: 'charge_1', status: 'refunded' });
+
+    await billingService.refundFailedJob('job_1');
+    await billingService.refundFailedJob('job_1');
+
+    expect(refundsCreateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes no refund action for a free job and does not throw', async () => {
+    repo.findJobById.mockResolvedValue({ id: 'job_free', stripePaymentIntentId: null });
+
+    await expect(billingService.refundFailedJob('job_free')).resolves.toBeUndefined();
+
+    expect(refundsCreateMock).not.toHaveBeenCalled();
+    expect(repo.updateChargeStatus).not.toHaveBeenCalled();
+  });
+
+  it('swallows a Stripe outage so caller error handling is never derailed', async () => {
+    repo.findJobById.mockResolvedValue({ id: 'job_1', stripePaymentIntentId: 'pi_1' });
+    repo.findChargeByPaymentIntentId.mockResolvedValue({ id: 'charge_1', status: 'paid' });
+    refundsCreateMock.mockRejectedValue(new Error('stripe is down'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(billingService.refundFailedJob('job_1')).resolves.toBeUndefined();
+
+    // The owed refund is loudly recorded rather than silently dropped.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('CRITICAL: refund failed for job job_1'),
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
   });
 });

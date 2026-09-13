@@ -14,6 +14,15 @@ const {
   failJobMock,
   sectionSoftDeleteMock,
   chapterSoftDeleteMock,
+  dbSelectMock,
+  updateJobProgressMock,
+  completeJobMock,
+  findCatalogByHashMock,
+  downloadPdfMock,
+  parseEpubMock,
+  chapterCreateMock,
+  sectionCreateMock,
+  refundFailedJobMock,
 } = vi.hoisted(() => ({
   updateMock: vi.fn(),
   dbDeleteMock: vi.fn(),
@@ -23,6 +32,15 @@ const {
   failJobMock: vi.fn(),
   sectionSoftDeleteMock: vi.fn(),
   chapterSoftDeleteMock: vi.fn(),
+  dbSelectMock: vi.fn(),
+  updateJobProgressMock: vi.fn(),
+  completeJobMock: vi.fn(),
+  findCatalogByHashMock: vi.fn(),
+  downloadPdfMock: vi.fn(),
+  parseEpubMock: vi.fn(),
+  chapterCreateMock: vi.fn(),
+  sectionCreateMock: vi.fn(),
+  refundFailedJobMock: vi.fn(),
 }));
 
 vi.mock('../../../src/lib/config.js', () => ({
@@ -35,22 +53,33 @@ vi.mock('../../../src/lib/config.js', () => ({
   },
 }));
 vi.mock('../../../src/db/index.js', () => ({
-  db: { delete: dbDeleteMock, transaction: transactionMock },
+  db: { delete: dbDeleteMock, transaction: transactionMock, select: dbSelectMock },
 }));
-vi.mock('../../../src/services/storage.service.js', () => ({ storageService: {} }));
+vi.mock('../../../src/services/storage.service.js', () => ({
+  storageService: { downloadPdf: downloadPdfMock },
+}));
 vi.mock('../../../src/services/pdf.service.js', () => ({ pdfService: {} }));
-vi.mock('../../../src/services/epub.service.js', () => ({ parseEpub: vi.fn() }));
+vi.mock('../../../src/services/epub.service.js', () => ({ parseEpub: parseEpubMock }));
+vi.mock('../../../src/services/billing.service.js', () => ({
+  billingService: { refundFailedJob: refundFailedJobMock },
+}));
 vi.mock('../../../src/repositories/book.repository.js', () => ({
-  bookRepository: { update: updateMock },
+  bookRepository: { update: updateMock, findCatalogByHash: findCatalogByHashMock },
 }));
 vi.mock('../../../src/repositories/processing-log.repository.js', () => ({
-  processingLogRepository: { getJob: getJobMock, append: appendMock, failJob: failJobMock },
+  processingLogRepository: {
+    getJob: getJobMock,
+    append: appendMock,
+    failJob: failJobMock,
+    updateJobProgress: updateJobProgressMock,
+    completeJob: completeJobMock,
+  },
 }));
 vi.mock('../../../src/repositories/chapter.repository.js', () => ({
-  chapterRepository: { softDeleteByBookId: chapterSoftDeleteMock },
+  chapterRepository: { softDeleteByBookId: chapterSoftDeleteMock, create: chapterCreateMock },
 }));
 vi.mock('../../../src/repositories/section.repository.js', () => ({
-  sectionRepository: { softDeleteByBookId: sectionSoftDeleteMock },
+  sectionRepository: { softDeleteByBookId: sectionSoftDeleteMock, create: sectionCreateMock },
 }));
 
 import { markBookErrored, processingService } from '../../../src/services/processing.service.js';
@@ -144,5 +173,99 @@ describe('processingService.cancelJob (KAN-270)', () => {
     expect(sectionSoftDeleteMock).not.toHaveBeenCalled();
     expect(chapterSoftDeleteMock).not.toHaveBeenCalled();
     expect(updateMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- Pipeline failure refunds (KAN-303) -------------------------------------
+// Drives the real orchestratePipeline through the EPUB branch (the PDF branch
+// needs pdfjs/Mathpix to get off the ground; both branches share the identical
+// failJob -> markBookErrored -> refundFailedJob catch tail).
+describe('orchestratePipeline - refund on pipeline failure (KAN-303)', () => {
+  // db.select().from().where().limit() -> the pdf_files row.
+  const selectReturning = (rows: any[]) => () => ({
+    from: () => ({ where: () => ({ limit: async () => rows }) }),
+  });
+
+  beforeEach(() => {
+    for (const m of [
+      updateMock, dbSelectMock, appendMock, failJobMock, updateJobProgressMock,
+      completeJobMock, findCatalogByHashMock, downloadPdfMock, parseEpubMock,
+      chapterCreateMock, sectionCreateMock, refundFailedJobMock, getJobMock,
+      transactionMock,
+    ]) m.mockReset();
+
+    findCatalogByHashMock.mockResolvedValue({ format: 'epub' });
+    dbSelectMock.mockImplementation(selectReturning([{ r2Key: 'r2/key', fileHash: 'hash-1' }]));
+    downloadPdfMock.mockResolvedValue(Buffer.from('epub-bytes'));
+    parseEpubMock.mockReturnValue({
+      title: 'Test Book',
+      author: 'Test Author',
+      chapters: [{ title: 'Ch 1', chapterIndex: 1, plainText: 'hello' }],
+    });
+    chapterCreateMock.mockResolvedValue({ id: 'chapter-1' });
+    sectionCreateMock.mockResolvedValue({ id: 'section-1' });
+    updateMock.mockResolvedValue(undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('refunds exactly once when a stage throws, and still fails the job + errors the book', async () => {
+    downloadPdfMock.mockRejectedValue(new Error('R2 download failed'));
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    // KAN-243 contract must not regress.
+    expect(failJobMock).toHaveBeenCalledWith('job-1', 'R2 download failed');
+    expect(updateMock).toHaveBeenCalledWith('book-1', { processingStatus: 'error' });
+    // KAN-303: the money goes back.
+    expect(refundFailedJobMock).toHaveBeenCalledTimes(1);
+    expect(refundFailedJobMock).toHaveBeenCalledWith('job-1');
+  });
+
+  it('refunds after the book has been errored, so a refund problem cannot strand the book', async () => {
+    downloadPdfMock.mockRejectedValue(new Error('R2 download failed'));
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(updateMock.mock.invocationCallOrder[0])
+      .toBeLessThan(refundFailedJobMock.mock.invocationCallOrder[0]);
+  });
+
+  it('still resolves (never rethrows) after a stage failure', async () => {
+    downloadPdfMock.mockRejectedValue(new Error('Mathpix timeout'));
+
+    await expect(
+      processingService.orchestratePipeline('job-1', 'hash-1', 'book-1'),
+    ).resolves.toBeUndefined();
+    expect(failJobMock).toHaveBeenCalledWith('job-1', 'Mathpix timeout');
+  });
+
+  it('issues no refund when the pipeline completes successfully', async () => {
+    findCatalogByHashMock
+      .mockResolvedValueOnce({ format: 'epub' }) // dispatcher
+      .mockResolvedValueOnce(null);              // cover stage - skip
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(completeJobMock).toHaveBeenCalledWith('job-1');
+    expect(failJobMock).not.toHaveBeenCalled();
+    expect(refundFailedJobMock).not.toHaveBeenCalled();
+    expect(updateMock).toHaveBeenCalledWith('book-1', {
+      processingStatus: 'complete',
+      structureSource: 'epub',
+    });
+  });
+
+  it('leaves the cancel path free of refunds', async () => {
+    getJobMock.mockResolvedValue({ id: 'job-1', bookId: 'book-1' });
+    transactionMock.mockImplementation(async (fn: any) => fn({}));
+
+    await processingService.cancelJob('job-1');
+
+    expect(failJobMock).toHaveBeenCalledWith('job-1', 'Cancelled by user');
+    expect(refundFailedJobMock).not.toHaveBeenCalled();
   });
 });

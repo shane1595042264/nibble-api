@@ -2,6 +2,7 @@ import { storageService } from './storage.service.js';
 import { pdfService } from './pdf.service.js';
 import type { OutlineItem } from './pdf.service.js';
 import { parseEpub } from './epub.service.js';
+import { billingService } from './billing.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { chapterRepository } from '../repositories/chapter.repository.js';
@@ -63,7 +64,16 @@ export const processingService = {
     return orchestratePdfPipeline(jobId, fileHash, bookId, mode);
   },
 
-  /** Cancel a processing job */
+  /**
+   * Cancel a processing job.
+   *
+   * Deliberately issues NO refund. This path calls failJob directly rather than
+   * going through either pipeline's catch, so the KAN-303 failure refund does
+   * not reach it — and that is the intended policy: a user choosing to stop
+   * their own job is a product decision, not the pipeline failing them. If that
+   * policy ever changes, wire it up here explicitly rather than by moving the
+   * refund onto the shared failJob path, which would refund cancels by accident.
+   */
   async cancelJob(jobId: string): Promise<void> {
     await processingLogRepository.append(jobId, 'cancel', 'Processing cancelled by user');
     await processingLogRepository.failJob(jobId, 'Cancelled by user');
@@ -442,6 +452,12 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
       await processingLogRepository.append(jobId, 'error', `Pipeline failed: ${errorMessage}`, 'error');
       await processingLogRepository.failJob(jobId, errorMessage);
       await markBookErrored(bookId, jobId);
+      // The customer paid for processing that never finished — give the money
+      // back here, at the point of failure. The catch above deliberately does
+      // not rethrow (see the file header), so the worker's outer net in
+      // process-pdf.ts never sees a stage failure and cannot do it (KAN-303).
+      // Runs last: it never throws, so the 'error' state above is already safe.
+      await billingService.refundFailedJob(jobId);
     }
 }
 
@@ -547,6 +563,9 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
     await processingLogRepository.append(jobId, 'error', `EPUB pipeline failed: ${errorMessage}`, 'error');
     await processingLogRepository.failJob(jobId, errorMessage);
     await markBookErrored(bookId, jobId);
+    // Same contract as the PDF pipeline above — refund at the point of failure
+    // because this catch does not rethrow either (KAN-303).
+    await billingService.refundFailedJob(jobId);
   }
 }
 

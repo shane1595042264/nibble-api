@@ -39,14 +39,13 @@ async function processNextJob() {
       console.error(`Job ${job.id} failed:`, error.message);
       await jobQueue.markFailed(job.id, error.message);
 
-      // Auto-refund on failure
-      if (job.stripePaymentIntentId) {
-        try {
-          await billingService.refund(job.stripePaymentIntentId);
-        } catch (refundError) {
-          console.error('Refund failed:', refundError);
-        }
-      }
+      // Backstop net, not the main refund path. Neither pipeline rethrows, so a
+      // stage failure (Mathpix/OCR/R2/pdf.js/DB) refunds itself inside
+      // processing.service's catch and never arrives here. What DOES arrive is a
+      // throw from before either pipeline's try block — e.g. findCatalogByHash in
+      // the dispatcher. Refunding again is safe: billingService.refund is
+      // idempotent, so this can never double-refund a job the pipeline handled.
+      await billingService.refundFailedJob(job.id);
     }
   } finally {
     running = false;

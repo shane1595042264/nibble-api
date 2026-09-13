@@ -234,12 +234,57 @@ export const billingService = {
     }
   },
 
+  /**
+   * Refund a payment intent, at most once.
+   *
+   * Two independent guards, because this moves real money and there are now two
+   * callers that can legitimately fire for the same job (the pipeline failure
+   * path and the worker's outer catch / stuck-job sweep):
+   *  1. the charge row — if it is already 'refunded' we never reach Stripe;
+   *  2. a Stripe idempotency key — covers the case where no charge row exists
+   *     (nothing to read a 'refunded' status off), where the guard above is
+   *     blind. Stripe keys expire after 24h, which comfortably outlives the
+   *     window in which two failure paths could both fire for one job.
+   */
   async refund(paymentIntentId: string) {
     if (!stripe) return;
-    await stripe.refunds.create({ payment_intent: paymentIntentId });
     const charge = await billingRepository.findChargeByPaymentIntentId(paymentIntentId);
+    if (charge?.status === 'refunded') {
+      console.log(`[billing] Payment intent ${paymentIntentId} already refunded — skipping`);
+      return;
+    }
+    await stripe.refunds.create(
+      { payment_intent: paymentIntentId },
+      { idempotencyKey: `refund:${paymentIntentId}` },
+    );
     if (charge) {
       await billingRepository.updateChargeStatus(charge.id, { status: 'refunded' });
+    }
+  },
+
+  /**
+   * Refund the charge behind a job whose processing failed (KAN-303).
+   *
+   * Shared by every failure path so the PDF and EPUB pipeline catches cannot
+   * drift apart. Free jobs carry no stripePaymentIntentId and are a no-op.
+   *
+   * This NEVER throws. It runs from inside catch blocks whose remaining job is
+   * to leave the book in a correct 'error' state (KAN-243); a Stripe outage
+   * must not turn a handled pipeline failure into an unhandled one. A refund we
+   * could not issue is logged loudly instead — that log is the only record that
+   * money is still owed, so it is deliberately shouty.
+   */
+  async refundFailedJob(jobId: string) {
+    try {
+      const job = await billingRepository.findJobById(jobId);
+      if (!job?.stripePaymentIntentId) return; // free job — nothing was charged
+      await billingService.refund(job.stripePaymentIntentId);
+      console.log(`[billing] Refunded failed job ${jobId} (${job.stripePaymentIntentId})`);
+    } catch (err) {
+      console.error(
+        `[billing] CRITICAL: refund failed for job ${jobId} — the customer was charged for processing that did not complete and NO refund was issued. Manual refund required.`,
+        err,
+      );
     }
   },
 
