@@ -25,6 +25,12 @@ export const WEBHOOK_PROCESSING_STALE_MS = 60_000;
 export type WebhookAction = 'skip' | 'process';
 
 /**
+ * Outcome of a failure refund attempt (KAN-303). 'no-charge' is the free-job
+ * path, 'refund-failed' means money is still owed and needs manual follow-up.
+ */
+export type RefundOutcome = 'refunded' | 'no-charge' | 'refund-failed';
+
+/**
  * Decide whether an incoming Stripe event should be (re)processed or skipped,
  * given the existing webhook_events row (if any).
  *
@@ -270,21 +276,26 @@ export const billingService = {
    *
    * This NEVER throws. It runs from inside catch blocks whose remaining job is
    * to leave the book in a correct 'error' state (KAN-243); a Stripe outage
-   * must not turn a handled pipeline failure into an unhandled one. A refund we
-   * could not issue is logged loudly instead — that log is the only record that
-   * money is still owed, so it is deliberately shouty.
+   * must not turn a handled pipeline failure into an unhandled one.
+   *
+   * Returns the outcome rather than staying silent, so the caller can write it
+   * to the job's processing log. An un-issued refund that exists only as a
+   * server console line is exactly the 'no queue to reconcile from' problem
+   * this ticket describes — the returned outcome is what makes it auditable.
    */
-  async refundFailedJob(jobId: string) {
+  async refundFailedJob(jobId: string): Promise<RefundOutcome> {
     try {
       const job = await billingRepository.findJobById(jobId);
-      if (!job?.stripePaymentIntentId) return; // free job — nothing was charged
+      if (!job?.stripePaymentIntentId) return 'no-charge'; // free job
       await billingService.refund(job.stripePaymentIntentId);
       console.log(`[billing] Refunded failed job ${jobId} (${job.stripePaymentIntentId})`);
+      return 'refunded';
     } catch (err) {
       console.error(
         `[billing] CRITICAL: refund failed for job ${jobId} — the customer was charged for processing that did not complete and NO refund was issued. Manual refund required.`,
         err,
       );
+      return 'refund-failed';
     }
   },
 

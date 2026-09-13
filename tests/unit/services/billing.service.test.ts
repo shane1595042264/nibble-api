@@ -232,7 +232,7 @@ describe('billingService.refundFailedJob', () => {
     repo.findJobById.mockResolvedValue({ id: 'job_1', stripePaymentIntentId: 'pi_1' });
     repo.findChargeByPaymentIntentId.mockResolvedValue({ id: 'charge_1', status: 'paid' });
 
-    await billingService.refundFailedJob('job_1');
+    await expect(billingService.refundFailedJob('job_1')).resolves.toBe('refunded');
 
     expect(refundsCreateMock).toHaveBeenCalledTimes(1);
     expect(refundsCreateMock).toHaveBeenCalledWith(
@@ -258,7 +258,7 @@ describe('billingService.refundFailedJob', () => {
   it('takes no refund action for a free job and does not throw', async () => {
     repo.findJobById.mockResolvedValue({ id: 'job_free', stripePaymentIntentId: null });
 
-    await expect(billingService.refundFailedJob('job_free')).resolves.toBeUndefined();
+    await expect(billingService.refundFailedJob('job_free')).resolves.toBe('no-charge');
 
     expect(refundsCreateMock).not.toHaveBeenCalled();
     expect(repo.updateChargeStatus).not.toHaveBeenCalled();
@@ -270,7 +270,9 @@ describe('billingService.refundFailedJob', () => {
     refundsCreateMock.mockRejectedValue(new Error('stripe is down'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(billingService.refundFailedJob('job_1')).resolves.toBeUndefined();
+    // Reports the failure to the caller (which writes it to the job's log)
+    // instead of throwing into the pipeline's catch block.
+    await expect(billingService.refundFailedJob('job_1')).resolves.toBe('refund-failed');
 
     // The owed refund is loudly recorded rather than silently dropped.
     expect(errorSpy).toHaveBeenCalledWith(

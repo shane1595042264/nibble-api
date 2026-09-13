@@ -205,6 +205,8 @@ describe('orchestratePipeline - refund on pipeline failure (KAN-303)', () => {
     chapterCreateMock.mockResolvedValue({ id: 'chapter-1' });
     sectionCreateMock.mockResolvedValue({ id: 'section-1' });
     updateMock.mockResolvedValue(undefined);
+    appendMock.mockResolvedValue(undefined);
+    refundFailedJobMock.mockResolvedValue('no-charge');
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -257,6 +259,43 @@ describe('orchestratePipeline - refund on pipeline failure (KAN-303)', () => {
       processingStatus: 'complete',
       structureSource: 'epub',
     });
+  });
+
+  it('records the refund outcome on the job log so an owed refund is auditable', async () => {
+    downloadPdfMock.mockRejectedValue(new Error('R2 download failed'));
+    refundFailedJobMock.mockResolvedValue('refunded');
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(appendMock).toHaveBeenCalledWith(
+      'job-1', 'refund', 'Processing failed — payment refunded', 'info',
+    );
+  });
+
+  it('logs an un-issued refund at error level so it can be reconciled by hand', async () => {
+    downloadPdfMock.mockRejectedValue(new Error('R2 download failed'));
+    refundFailedJobMock.mockResolvedValue('refund-failed');
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(appendMock).toHaveBeenCalledWith(
+      'job-1', 'refund', 'Processing failed — REFUND FAILED, manual refund required', 'error',
+    );
+  });
+
+  it('does not rethrow when the refund audit-log write itself fails', async () => {
+    downloadPdfMock.mockRejectedValue(new Error('R2 download failed'));
+    refundFailedJobMock.mockResolvedValue('refunded');
+    // The final append (the refund line) rejects; earlier appends succeed.
+    appendMock.mockResolvedValue(undefined);
+    appendMock.mockImplementation(async (_id: string, stage: string) => {
+      if (stage === 'refund') throw new Error('logs table unavailable');
+    });
+
+    await expect(
+      processingService.orchestratePipeline('job-1', 'hash-1', 'book-1'),
+    ).resolves.toBeUndefined();
+    expect(refundFailedJobMock).toHaveBeenCalledTimes(1);
   });
 
   it('leaves the cancel path free of refunds', async () => {

@@ -3,6 +3,7 @@ import { pdfService } from './pdf.service.js';
 import type { OutlineItem } from './pdf.service.js';
 import { parseEpub } from './epub.service.js';
 import { billingService } from './billing.service.js';
+import type { RefundOutcome } from './billing.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { chapterRepository } from '../repositories/chapter.repository.js';
@@ -47,6 +48,30 @@ export async function markBookErrored(bookId: string, jobId: string): Promise<vo
       await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
     }
   }
+}
+
+/**
+ * Refund a failed job and leave a record of what happened on the job's own
+ * processing log, so an owed-but-unissued refund is visible next to the
+ * failure that caused it instead of only in the server console (KAN-303).
+ */
+const REFUND_LOG: Record<RefundOutcome, { message: string; level: string }> = {
+  'refunded': { message: 'Processing failed — payment refunded', level: 'info' },
+  'no-charge': { message: 'Processing failed — no charge to refund', level: 'info' },
+  'refund-failed': {
+    message: 'Processing failed — REFUND FAILED, manual refund required',
+    level: 'error',
+  },
+};
+
+async function refundAndLog(jobId: string): Promise<void> {
+  const outcome = await billingService.refundFailedJob(jobId);
+  const { message, level } = REFUND_LOG[outcome];
+  // Never let the audit-log write resurface as an unhandled pipeline error —
+  // the refund itself has already happened by this point.
+  await processingLogRepository
+    .append(jobId, 'refund', message, level)
+    .catch((err) => console.error(`[processing] failed to log refund outcome for job ${jobId}`, err));
 }
 
 export const processingService = {
@@ -457,7 +482,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
       // not rethrow (see the file header), so the worker's outer net in
       // process-pdf.ts never sees a stage failure and cannot do it (KAN-303).
       // Runs last: it never throws, so the 'error' state above is already safe.
-      await billingService.refundFailedJob(jobId);
+      await refundAndLog(jobId);
     }
 }
 
@@ -565,7 +590,7 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
     await markBookErrored(bookId, jobId);
     // Same contract as the PDF pipeline above — refund at the point of failure
     // because this catch does not rethrow either (KAN-303).
-    await billingService.refundFailedJob(jobId);
+    await refundAndLog(jobId);
   }
 }
 
