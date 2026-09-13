@@ -64,8 +64,16 @@ function makeApp() {
 
 const retry = () => makeApp().request(`/processing/${JOB_ID}/retry`, { method: 'POST' });
 
+// The real shape: drizzle wraps the driver rejection, so the SQLSTATE is on
+// .cause, not on the thrown error itself (confirmed against the prod DB).
 const uniqueViolation = () =>
-  Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+  Object.assign(new Error('Failed query: insert into "processing_jobs" ...'), {
+    name: 'DrizzleQueryError',
+    cause: Object.assign(new Error('duplicate key value violates unique constraint'), {
+      name: 'PostgresError',
+      code: '23505',
+    }),
+  });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -144,7 +152,12 @@ describe('POST /processing/:jobId/retry — active-job collision', () => {
   });
 
   it('does not swallow non-unique driver errors as a conflict', async () => {
-    insertJob.mockRejectedValue(Object.assign(new Error('deadlock detected'), { code: '40P01' }));
+    insertJob.mockRejectedValue(
+      Object.assign(new Error('Failed query'), {
+        name: 'DrizzleQueryError',
+        cause: Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+      }),
+    );
 
     const res = await retry();
     expect(res.status).toBe(500);

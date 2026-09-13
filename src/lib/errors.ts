@@ -35,12 +35,30 @@ export const Errors = {
 };
 
 /**
+ * True when `err` — or anything on its cause chain — carries the given SQLSTATE.
+ *
+ * Drizzle wraps every driver rejection in a DrizzleQueryError whose own `code`
+ * is undefined and hangs the real PostgresError (the one carrying SQLSTATE) off
+ * `.cause`. A top-level `err.code` check therefore never matches a real query
+ * failure, so every caller silently fell through to an opaque 500 (KAN-302).
+ */
+function hasSqlState(err: unknown, sqlState: string): boolean {
+  let current: unknown = err;
+  // Bounded so a self-referential cause chain can't spin.
+  for (let depth = 0; current !== null && current !== undefined && depth < 5; depth++) {
+    if (typeof current === 'object' && (current as { code?: unknown }).code === sqlState) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
  * True when a driver error is a Postgres foreign-key violation (SQLSTATE 23503).
  * Lets a handler turn an FK restrict/no-action rejection into an actionable 4xx
  * instead of letting it fall through the global handler as an opaque 500.
  */
 export function isForeignKeyViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23503';
+  return hasSqlState(err, '23503');
 }
 
 /**
@@ -50,5 +68,5 @@ export function isForeignKeyViolation(err: unknown): boolean {
  * code to a real 409 keeps that from surfacing as an opaque 500.
  */
 export function isUniqueViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23505';
+  return hasSqlState(err, '23505');
 }
