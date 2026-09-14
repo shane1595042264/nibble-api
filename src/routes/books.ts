@@ -371,10 +371,16 @@ bookRoutes.put('/:id/structure', async (c) => {
     return { newChapters: insertedChapters, newSections: insertedSections };
   });
 
-  // Update book structure source
-  await bookRepository.update(book.id, { structureSource: 'manual' });
+  // Update book structure source. This UPDATE re-stamps books.updatedAt via $onUpdate,
+  // so the token the client just spent is already dead — return the new one so the next
+  // save (and the optimistic-lock check above) can succeed without waiting for a sync.
+  const updatedBook = await bookRepository.update(book.id, { structureSource: 'manual' });
 
-  return c.json({ chapters: newChapters, sections: newSections });
+  return c.json({
+    chapters: newChapters,
+    sections: newSections,
+    updatedAt: (updatedBook?.updatedAt ?? book.updatedAt).toISOString(),
+  });
 });
 
 // POST /:id/suggest-structure — use Claude Vision to parse TOC pages
