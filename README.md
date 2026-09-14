@@ -1,5 +1,5 @@
 # nibble-api
-
+(test push)
 Backend API for WordByWord — a local-first AI-powered PDF reading tracker for technical books.
 
 **Stack:** Hono + TypeScript + Drizzle ORM + PostgreSQL + Cloudflare R2 + Stripe + Claude API + Mathpix
