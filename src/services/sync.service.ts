@@ -95,9 +95,10 @@ const BOOK_CREATE_FIELDS = [
   'updatedAt',
 ] as const;
 
+// No coverUrl: WordByWord's coverImage is usually a page-1 PNG data: URL rendered
+// on-device, and it must not be written into books.cover_url on every push.
 const BOOK_UPDATE_FIELDS = [
   'customTitle',
-  'coverUrl',
   'lastReadAt',
   'lastAccessedSectionId',
   'lastAccessedScrollProgress',
@@ -251,11 +252,13 @@ export const syncService = {
           if (tombstone.userId === userId) tombstones.books.push(tombstone);
           continue;
         }
-        // Skip books without a valid catalogId (required NOT NULL field)
-        if (!clientBook.catalogId || !isValidUuid(clientBook.catalogId as string)) continue;
         const coerced = coerceDates(clientBook);
         const server = serverBookMap.get(clientBook.id) ?? null;
         if (!server) {
+          // catalogId (NOT NULL) is only needed to create the row. WordByWord never
+          // creates books through sync — uploads go through /books — so bookToSync
+          // doesn't send it; requiring it for updates made them unreachable.
+          if (!isValidUuid(clientBook.catalogId)) continue;
           await bookRepository.create({
             ...pickFields(coerced, BOOK_CREATE_FIELDS),
             userId,
@@ -270,7 +273,13 @@ export const syncService = {
             if (clientBook.deletedAt) {
               await bookRepository.softDelete(clientBook.id);
             } else {
-              await bookRepository.update(clientBook.id, pickFields(coerced, BOOK_UPDATE_FIELDS) as any);
+              const data = pickFields(coerced, BOOK_UPDATE_FIELDS);
+              // A uuid column fed from the reader's URL segment: a junk value would throw
+              // and re-queue the book on every sync, so drop just that field.
+              if (data.lastAccessedSectionId != null && !isValidUuid(data.lastAccessedSectionId)) {
+                delete data.lastAccessedSectionId;
+              }
+              await bookRepository.update(clientBook.id, data as any);
             }
           }
         }
