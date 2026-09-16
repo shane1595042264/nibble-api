@@ -112,12 +112,14 @@ export const chapterRepository = {
     return warnIfCapped(rows, { entity: 'chapters', scope: { bookCount: bookIds.length, since: since.toISOString() } });
   },
 
-  async findByIds(ids: string[]) {
+  // includeDeleted: sync must see tombstones, or a pushed id that exists only as a
+  // soft-deleted row looks new and its INSERT hits the primary key.
+  async findByIds(ids: string[], opts: { includeDeleted?: boolean } = {}) {
     if (ids.length === 0) return [];
     const rows = await db
       .select()
       .from(chapters)
-      .where(and(inArray(chapters.id, ids), isNull(chapters.deletedAt)))
+      .where(opts.includeDeleted ? inArray(chapters.id, ids) : and(inArray(chapters.id, ids), isNull(chapters.deletedAt)))
       .limit(MAX_LIST_ROWS);
     return warnIfCapped(rows, { entity: 'chapters', scope: { idsRequested: ids.length } });
   },

@@ -72,6 +72,13 @@ function coerceDates(entity: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+/** Append echoed tombstones the modified-since query didn't already return (once per id). */
+function withTombstones<T extends { id: string }>(rows: T[], tombstones: T[]): T[] {
+  const seen = new Set(rows.map((r) => r.id));
+  const extra = tombstones.filter((t) => !seen.has(t.id) && seen.add(t.id));
+  return [...rows, ...extra];
+}
+
 // Allowlists for book create/update via sync. Columns not listed here —
 // processingStatus, structureSource, userId, catalogId (on update), etc. —
 // are backend-managed and must not be writable by the client.
@@ -209,11 +216,14 @@ export const syncService = {
     const clientSectionIds = payload.changes.sections.map((s) => s.id).filter(isValidUuid);
     const clientVocabIds = payload.changes.vocabulary.map((v) => v.id).filter(isValidUuid);
 
+    // Soft-deleted rows are included so a stale client's push of a row the server
+    // has already deleted is recognised as a tombstone, not mistaken for a new row
+    // whose INSERT hits the primary key and is failed/re-queued on every sync.
     const [serverBooksArr, serverChaptersArr, serverSectionsArr, serverVocabArr] = await Promise.all([
-      bookRepository.findByIds(clientBookIds),
-      chapterRepository.findByIds(clientChapterIds),
-      sectionRepository.findByIds(clientSectionIds),
-      vocabularyRepository.findByIds(clientVocabIds),
+      bookRepository.findByIds(clientBookIds, { includeDeleted: true }),
+      chapterRepository.findByIds(clientChapterIds, { includeDeleted: true }),
+      sectionRepository.findByIds(clientSectionIds, { includeDeleted: true }),
+      vocabularyRepository.findByIds(clientVocabIds, { includeDeleted: true }),
     ]);
 
     const serverBookMap = new Map(serverBooksArr.map((b) => [b.id, b]));
@@ -221,10 +231,25 @@ export const syncService = {
     const serverSectionMap = new Map(serverSectionsArr.map((s) => [s.id, s]));
     const serverVocabMap = new Map(serverVocabArr.map((v) => [v.id, v]));
 
+    // The delete wins: a pushed id whose server row is soft-deleted is not written
+    // and not failed. Its tombstone is echoed back in serverChanges (step 2) even if
+    // it predates lastSyncedAt, so the stale client drops its copy (KAN-229 intent).
+    const tombstones = {
+      books: [] as typeof serverBooksArr,
+      chapters: [] as typeof serverChaptersArr,
+      sections: [] as typeof serverSectionsArr,
+      vocabulary: [] as typeof serverVocabArr,
+    };
+
     // Books
     for (const clientBook of payload.changes.books) {
       try {
         if (!isValidUuid(clientBook.id)) continue;
+        const tombstone = serverBookMap.get(clientBook.id);
+        if (tombstone?.deletedAt) {
+          if (tombstone.userId === userId) tombstones.books.push(tombstone);
+          continue;
+        }
         // Skip books without a valid catalogId (required NOT NULL field)
         if (!clientBook.catalogId || !isValidUuid(clientBook.catalogId as string)) continue;
         const coerced = coerceDates(clientBook);
@@ -256,7 +281,7 @@ export const syncService = {
     // After processing books, update the existence set so child entities aren't skipped
     for (const clientBook of payload.changes.books) {
       if (!isValidUuid(clientBook.id)) continue;
-      if (clientBook.deletedAt) {
+      if (clientBook.deletedAt || serverBookMap.get(clientBook.id)?.deletedAt) {
         existingBookIdSet.delete(clientBook.id);
       } else {
         existingBookIdSet.add(clientBook.id);
@@ -267,6 +292,11 @@ export const syncService = {
     for (const clientChapter of payload.changes.chapters) {
       try {
         if (!isValidUuid(clientChapter.id)) continue;
+        const tombstone = serverChapterMap.get(clientChapter.id);
+        if (tombstone?.deletedAt) {
+          tombstones.chapters.push(tombstone); // ownership is checked before the echo
+          continue;
+        }
         // Skip if the book doesn't exist on the server (deleted or never uploaded)
         if (clientChapter.bookId && isValidUuid(clientChapter.bookId as string)) {
           if (!existingBookIdSet.has(clientChapter.bookId as string)) continue;
@@ -300,7 +330,8 @@ export const syncService = {
     // After processing chapters, update the existence set so sections aren't skipped
     for (const clientChapter of payload.changes.chapters) {
       if (!isValidUuid(clientChapter.id)) continue;
-      if (clientChapter.deletedAt) {
+      // A tombstoned chapter must not become a parent for new sections either.
+      if (clientChapter.deletedAt || serverChapterMap.get(clientChapter.id)?.deletedAt) {
         existingChapterIdSet.delete(clientChapter.id);
       } else {
         existingChapterIdSet.add(clientChapter.id);
@@ -311,6 +342,11 @@ export const syncService = {
     for (const clientSection of payload.changes.sections) {
       try {
         if (!isValidUuid(clientSection.id)) continue;
+        const tombstone = serverSectionMap.get(clientSection.id);
+        if (tombstone?.deletedAt) {
+          tombstones.sections.push(tombstone); // ownership is checked before the echo
+          continue;
+        }
         // Skip if the book doesn't exist on the server
         if (clientSection.bookId && isValidUuid(clientSection.bookId as string)) {
           if (!existingBookIdSet.has(clientSection.bookId as string)) continue;
@@ -363,6 +399,13 @@ export const syncService = {
     for (const clientWord of payload.changes.vocabulary) {
       try {
         if (!isValidUuid(clientWord.id)) continue;
+        // Checked before the knowledge-base forward below: a deleted word must
+        // never be re-forwarded (it would be, on every sync, before failing).
+        const tombstone = serverVocabMap.get(clientWord.id);
+        if (tombstone?.deletedAt) {
+          if (tombstone.userId === userId) tombstones.vocabulary.push(tombstone);
+          continue;
+        }
         // Skip if the referenced book doesn't exist on the server
         if (clientWord.bookId && isValidUuid(clientWord.bookId as string)) {
           if (!existingBookIdSet.has(clientWord.bookId as string)) continue;
@@ -491,8 +534,8 @@ export const syncService = {
 
     // ── 2. Gather server changes for the client ──────────────────
 
-    // Books modified since lastSyncedAt (includes soft-deleted)
-    const serverBooksRaw = await bookRepository.findModifiedSince(userId, since);
+    // Books modified since lastSyncedAt (includes soft-deleted), plus echoed tombstones
+    const serverBooksRaw = withTombstones(await bookRepository.findModifiedSince(userId, since), tombstones.books);
 
     // Get book IDs to query child entities
     const userBooks = await bookRepository.findByUserId(userId);
@@ -515,12 +558,29 @@ export const syncService = {
       ]),
     ];
 
+    // Chapter/section tombstones are echoed only when their book belongs to this
+    // user — the pushed ids are client-controlled, so they prove nothing.
+    const tombstoneBookIds = [...new Set([...tombstones.chapters, ...tombstones.sections].map((r) => r.bookId))];
+    const ownedTombstoneBookIds = new Set(
+      (await bookRepository.findByIds(tombstoneBookIds, { includeDeleted: true }))
+        .filter((b) => b.userId === userId)
+        .map((b) => b.id),
+    );
+    const ownedTombstones = <T extends { bookId: string }>(rows: T[]) =>
+      rows.filter((r) => ownedTombstoneBookIds.has(r.bookId));
+
     // Chapters & sections for all user books (batch query)
-    const serverChapters = await chapterRepository.findModifiedSinceForBooks(allBookIds, since) as unknown as SyncEntity[];
-    const serverSections = await sectionRepository.findModifiedSinceForBooks(allBookIds, since) as unknown as SyncEntity[];
+    const serverChapters = withTombstones(
+      await chapterRepository.findModifiedSinceForBooks(allBookIds, since),
+      ownedTombstones(tombstones.chapters),
+    ) as unknown as SyncEntity[];
+    const serverSections = withTombstones(
+      await sectionRepository.findModifiedSinceForBooks(allBookIds, since),
+      ownedTombstones(tombstones.sections),
+    ) as unknown as SyncEntity[];
 
     // Vocabulary
-    const serverVocabulary = await vocabularyRepository.findModifiedSince(userId, since);
+    const serverVocabulary = withTombstones(await vocabularyRepository.findModifiedSince(userId, since), tombstones.vocabulary);
 
     // Settings
     const serverSettings = await settingsRepository.findModifiedSince(userId, since);

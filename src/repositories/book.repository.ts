@@ -136,12 +136,13 @@ export const bookRepository = {
     await db.delete(books).where(eq(books.id, id));
   },
 
-  async findByIds(ids: string[]) {
+  // includeDeleted: see chapterRepository.findByIds.
+  async findByIds(ids: string[], opts: { includeDeleted?: boolean } = {}) {
     if (ids.length === 0) return [];
     const rows = await db
       .select()
       .from(books)
-      .where(and(inArray(books.id, ids), isNull(books.deletedAt)))
+      .where(opts.includeDeleted ? inArray(books.id, ids) : and(inArray(books.id, ids), isNull(books.deletedAt)))
       .limit(MAX_LIST_ROWS);
     return warnIfCapped(rows, { entity: 'books', scope: { idsRequested: ids.length } });
   },

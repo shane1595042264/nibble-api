@@ -106,12 +106,13 @@ export const vocabularyRepository = {
     return result?.value ?? 0;
   },
 
-  async findByIds(ids: string[]) {
+  // includeDeleted: see chapterRepository.findByIds.
+  async findByIds(ids: string[], opts: { includeDeleted?: boolean } = {}) {
     if (ids.length === 0) return [];
     const rows = await db
       .select()
       .from(vocabulary)
-      .where(and(inArray(vocabulary.id, ids), isNull(vocabulary.deletedAt)))
+      .where(opts.includeDeleted ? inArray(vocabulary.id, ids) : and(inArray(vocabulary.id, ids), isNull(vocabulary.deletedAt)))
       .limit(MAX_LIST_ROWS);
     return warnIfCapped(rows, { entity: 'vocabulary', scope: { idsRequested: ids.length } });
   },

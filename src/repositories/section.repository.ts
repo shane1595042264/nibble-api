@@ -141,12 +141,13 @@ export const sectionRepository = {
     return counts;
   },
 
-  async findByIds(ids: string[]) {
+  // includeDeleted: see chapterRepository.findByIds.
+  async findByIds(ids: string[], opts: { includeDeleted?: boolean } = {}) {
     if (ids.length === 0) return [];
     const rows = await db
       .select()
       .from(sections)
-      .where(and(inArray(sections.id, ids), isNull(sections.deletedAt)))
+      .where(opts.includeDeleted ? inArray(sections.id, ids) : and(inArray(sections.id, ids), isNull(sections.deletedAt)))
       .limit(MAX_LIST_ROWS);
     return warnIfCapped(rows, { entity: 'sections', scope: { idsRequested: ids.length } });
   },
