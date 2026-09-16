@@ -242,6 +242,7 @@ export const syncService = {
     };
 
     // Books
+    const createdBookIds = new Set<string>();
     for (const clientBook of payload.changes.books) {
       try {
         if (!isValidUuid(clientBook.id)) continue;
@@ -259,6 +260,7 @@ export const syncService = {
             ...pickFields(coerced, BOOK_CREATE_FIELDS),
             userId,
           } as any);
+          createdBookIds.add(clientBook.id);
         } else {
           // Security: skip books not owned by the authenticated user
           if (server.userId !== userId) continue;
@@ -278,10 +280,14 @@ export const syncService = {
       }
     }
 
-    // After processing books, update the existence set so child entities aren't skipped
+    // After processing books, update the existence set so child entities aren't skipped.
+    // Security: a pushed id is client-controlled, so it only unlocks its children if
+    // this push created the book or its live server row belongs to this user.
     for (const clientBook of payload.changes.books) {
       if (!isValidUuid(clientBook.id)) continue;
-      if (clientBook.deletedAt || serverBookMap.get(clientBook.id)?.deletedAt) {
+      const server = serverBookMap.get(clientBook.id);
+      const owned = createdBookIds.has(clientBook.id) || (server?.userId === userId && !server.deletedAt);
+      if (clientBook.deletedAt || !owned) {
         existingBookIdSet.delete(clientBook.id);
       } else {
         existingBookIdSet.add(clientBook.id);
