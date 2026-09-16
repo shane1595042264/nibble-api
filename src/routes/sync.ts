@@ -48,17 +48,25 @@ const syncSectionSchema = z.object({
 // Page ranges mirror the REST contract in chapters.ts / sections.ts: positive
 // ints and startPage <= endPage. .passthrough() is kept so unknown forward-compat
 // fields still flow; .refine sits after passthrough to gate the cross-field rule.
+//
+// Unlike REST, sync must also accept NULL wherever the column is nullable: a
+// fresh device pushes every downloaded row straight back, so a value the server
+// stores and emits in serverChanges has to pass here or that row is re-queued
+// and rejected on every sync forever. null is matched before the coerce because
+// z.coerce.number() turns null into 0, which .positive() then rejects.
+const syncPage = z.union([z.null(), z.coerce.number().int().positive()]).optional();
+
 export const chapterBoundsSchema = z
   .object({
     title: z.string().max(CHAPTER_TITLE_MAX).optional(),
-    startPage: z.coerce.number().int().positive().optional(),
-    endPage: z.coerce.number().int().positive().optional(),
+    startPage: syncPage,
+    endPage: syncPage,
   })
   .passthrough()
   .refine(
     (data) =>
-      data.startPage === undefined ||
-      data.endPage === undefined ||
+      data.startPage == null ||
+      data.endPage == null ||
       data.startPage <= data.endPage,
     { message: 'Chapter startPage must be <= endPage' },
   );
@@ -67,16 +75,16 @@ export const sectionBoundsSchema = z
   .object({
     title: z.string().max(SECTION_TITLE_MAX).optional(),
     sectionType: z.string().max(SECTION_TYPE_MAX).optional(),
-    extractedText: z.string().max(SECTION_EXTRACTED_TEXT_MAX).optional(),
-    richContent: z.string().max(SECTION_RICH_CONTENT_MAX).optional(),
-    startPage: z.coerce.number().int().positive().optional(),
-    endPage: z.coerce.number().int().positive().optional(),
+    extractedText: z.string().max(SECTION_EXTRACTED_TEXT_MAX).nullable().optional(),
+    richContent: z.string().max(SECTION_RICH_CONTENT_MAX).nullable().optional(),
+    startPage: syncPage,
+    endPage: syncPage,
   })
   .passthrough()
   .refine(
     (data) =>
-      data.startPage === undefined ||
-      data.endPage === undefined ||
+      data.startPage == null ||
+      data.endPage == null ||
       data.startPage <= data.endPage,
     { message: 'Section startPage must be <= endPage' },
   );
