@@ -163,34 +163,186 @@ function parseOpf(xml: string): OpfData {
   };
 }
 
+/** Strip the fragment and percent-decode an href, tolerating a malformed escape. */
+function decodeHref(href: string): string {
+  const bare = href.split('#')[0];
+  try {
+    return decodeURIComponent(bare);
+  } catch {
+    return bare;
+  }
+}
+
 /**
- * Parse an NCX toc and return a map from chapter-file href → chapter title.
+ * Resolve an href against the directory of the document that declared it and
+ * normalise it to a zip-relative path. Manifest hrefs are relative to the OPF;
+ * NCX/nav hrefs are relative to the TOC document. Running both sides of the
+ * title lookup through this is what makes them comparable — fixing only one
+ * side would re-break the other.
+ */
+function resolveRelative(baseDir: string, href: string): string {
+  const decoded = decodeHref(href);
+  const joined = baseDir && baseDir !== '.' ? path.posix.join(baseDir, decoded) : decoded;
+  return path.posix.normalize(joined);
+}
+
+/** Local name of a possibly namespace-prefixed element or attribute key. */
+function localName(key: string): string {
+  const i = key.indexOf(':');
+  return i === -1 ? key : key.slice(i + 1);
+}
+
+/**
+ * EPUB 3 nav documents are XHTML, and a TOC label can carry inline markup
+ * (`<a>Chapter <em>One</em></a>`). The shared parser folds every text segment of
+ * a mixed-content element into a single `#text` string, losing document order
+ * and scrambling such a label, so nav walking gets its own preserveOrder parser.
+ */
+const navParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  parseAttributeValue: false,
+  removeNSPrefix: false,
+  trimValues: true,
+  preserveOrder: true,
+});
+
+/** A preserveOrder node: one tag key holding an array of children, plus `:@` attrs. */
+type OrderedNode = Record<string, any>;
+
+/** The tag name of a preserveOrder node — `#text` for a text node. */
+function tagOf(node: OrderedNode): string | null {
+  for (const key of Object.keys(node)) {
+    if (key !== ':@') return key;
+  }
+  return null;
+}
+
+function childrenOf(node: OrderedNode, tag: string): OrderedNode[] {
+  const value = node[tag];
+  return Array.isArray(value) ? value : [];
+}
+
+function attrsOf(node: OrderedNode): Record<string, unknown> {
+  return (node[':@'] as Record<string, unknown>) ?? {};
+}
+
+/** Text content of a preserveOrder subtree, in document order. */
+function orderedText(nodes: OrderedNode[]): string {
+  const parts: string[] = [];
+  for (const node of nodes) {
+    const tag = tagOf(node);
+    if (tag === null) continue;
+    const text = tag === '#text' ? String(node['#text'] ?? '').trim() : orderedText(childrenOf(node, tag));
+    if (text) parts.push(text);
+  }
+  return parts.join(' ');
+}
+
+/** Collect every <nav> element in a preserveOrder tree, at any depth. */
+function collectNavElements(nodes: OrderedNode[], out: OrderedNode[]): void {
+  for (const node of nodes) {
+    const tag = tagOf(node);
+    if (tag === null || tag === '#text') continue;
+    if (localName(tag) === 'nav') out.push(node);
+    collectNavElements(childrenOf(node, tag), out);
+  }
+}
+
+/**
+ * Tokens of a <nav>'s epub:type / role attributes. removeNSPrefix is false, so
+ * the attribute arrives under its prefixed name (`@_epub:type`).
+ */
+function navTypeTokens(nav: OrderedNode): string[] {
+  const tokens: string[] = [];
+  for (const [key, value] of Object.entries(attrsOf(nav))) {
+    if (!key.startsWith('@_') || typeof value !== 'string') continue;
+    const name = localName(key.slice(2));
+    if (name === 'type' || name === 'role') {
+      tokens.push(...value.toLowerCase().split(/\s+/).filter(Boolean));
+    }
+  }
+  return tokens;
+}
+
+/** The toc nav, by epub:type then ARIA role, falling back to the first <nav>. */
+function pickTocNav(navs: OrderedNode[]): OrderedNode | null {
+  return (
+    navs.find((n) => navTypeTokens(n).includes('toc')) ??
+    navs.find((n) => navTypeTokens(n).includes('doc-toc')) ??
+    navs[0] ??
+    null
+  );
+}
+
+/**
+ * EPUB 3: record every <a href> under the toc nav, in document order. Walking
+ * for anchors rather than for a strict ol/li shape keeps nested <ol> lists,
+ * <span> wrappers and publisher-specific markup working alike.
+ */
+function walkNavAnchors(nodes: OrderedNode[], tocDir: string, map: Map<string, string>): void {
+  for (const node of nodes) {
+    const tag = tagOf(node);
+    if (tag === null || tag === '#text') continue;
+    const children = childrenOf(node, tag);
+    if (localName(tag) === 'a') {
+      const href = attrsOf(node)['@_href'];
+      if (typeof href === 'string' && href) {
+        const label = orderedText(children).replace(/\s+/g, ' ').trim();
+        const key = resolveRelative(tocDir, href);
+        if (label && !map.has(key)) map.set(key, label);
+      }
+      continue;
+    }
+    walkNavAnchors(children, tocDir, map);
+  }
+}
+
+/** EPUB 2: walk <navMap><navPoint>, nested navPoints included. */
+function walkNavPoints(points: any[], tocDir: string, map: Map<string, string>): void {
+  for (const p of points) {
+    const label = p?.navLabel?.text;
+    const labelText = typeof label === 'string' ? label : label?.['#text'];
+    const src = p?.content?.['@_src'];
+    if (labelText && typeof src === 'string') {
+      const key = resolveRelative(tocDir, src);
+      const clean = String(labelText).trim();
+      if (clean && !map.has(key)) map.set(key, clean);
+    }
+    if (p?.navPoint) {
+      walkNavPoints(Array.isArray(p.navPoint) ? p.navPoint : [p.navPoint], tocDir, map);
+    }
+  }
+}
+
+/**
+ * Parse an EPUB table of contents — EPUB 2 NCX *or* EPUB 3 nav XHTML — into a
+ * map from zip-relative chapter path → chapter title. `tocDir` is the TOC
+ * file's own directory, which is what its hrefs are relative to.
  * Silently returns an empty map on any error — caller falls back gracefully.
  */
-function parseNcxTitles(ncxXml: string): Map<string, string> {
+function parseTocTitles(tocXml: string, tocDir: string): Map<string, string> {
   const map = new Map<string, string>();
   try {
-    const parsed = xmlParser.parse(ncxXml);
-    const navPoints = parsed?.ncx?.navMap?.navPoint;
-    const arr = Array.isArray(navPoints) ? navPoints : navPoints ? [navPoints] : [];
-    const walk = (points: any[]) => {
-      for (const p of points) {
-        const label = p?.navLabel?.text;
-        const labelText = typeof label === 'string' ? label : label?.['#text'];
-        const src = p?.content?.['@_src'];
-        if (labelText && typeof src === 'string') {
-          // Strip fragment and decode
-          const href = decodeURIComponent(src.split('#')[0]);
-          const clean = String(labelText).trim();
-          if (clean && !map.has(href)) map.set(href, clean);
-        }
-        if (p?.navPoint) {
-          const nested = Array.isArray(p.navPoint) ? p.navPoint : [p.navPoint];
-          walk(nested);
-        }
-      }
-    };
-    walk(arr);
+    const parsed = xmlParser.parse(tocXml);
+    if (!parsed || typeof parsed !== 'object') return map;
+
+    // EPUB 2: <ncx><navMap><navPoint>
+    const ncxRootKey = Object.keys(parsed).find((k) => localName(k) === 'ncx');
+    if (ncxRootKey) {
+      const navPoints = parsed[ncxRootKey]?.navMap?.navPoint;
+      const arr = Array.isArray(navPoints) ? navPoints : navPoints ? [navPoints] : [];
+      walkNavPoints(arr, tocDir, map);
+      return map;
+    }
+
+    // EPUB 3: XHTML with <nav epub:type="toc"><ol><li><a href="…">Title</a>
+    const navs: OrderedNode[] = [];
+    collectNavElements(navParser.parse(tocXml) as OrderedNode[], navs);
+    const toc = pickTocNav(navs);
+    const tocTag = toc ? tagOf(toc) : null;
+    if (!toc || !tocTag) return map;
+    walkNavAnchors(childrenOf(toc, tocTag), tocDir, map);
   } catch {
     // fall through
   }
@@ -273,10 +425,7 @@ export function parseEpub(buffer: Buffer): EpubBook {
 
   // Paths inside the OPF are relative to the OPF's own directory.
   const opfDir = path.posix.dirname(opfPath);
-  const resolveHref = (href: string) => {
-    const decoded = decodeURIComponent(href.split('#')[0]);
-    return opfDir && opfDir !== '.' ? path.posix.join(opfDir, decoded) : decoded;
-  };
+  const resolveHref = (href: string) => resolveRelative(opfDir, href);
 
   // Cover
   let coverImage: Buffer | null = null;
@@ -292,15 +441,20 @@ export function parseEpub(buffer: Buffer): EpubBook {
     }
   }
 
-  // NCX / nav TOC — canonical source of chapter titles when present.
-  // Keyed by the href as it appears in the manifest (pre-resolve), so lookups
-  // match what we see on each manifest item.
-  let ncxTitles = new Map<string, string>();
+  // TOC (EPUB 2 NCX or EPUB 3 nav) — canonical source of chapter titles when
+  // present. Keyed by zip-relative path, resolved against the TOC document's
+  // own directory, so the lookup below — which resolves the manifest href the
+  // same way — matches regardless of percent-encoding or of the TOC sitting in
+  // a different directory than the OPF.
+  let tocTitles = new Map<string, string>();
   if (opf.tocId) {
     const tocItem = opf.manifest.get(opf.tocId);
     if (tocItem) {
-      const tocEntry = zip.getEntry(resolveHref(tocItem.href));
-      if (tocEntry) ncxTitles = parseNcxTitles(tocEntry.getData().toString('utf-8'));
+      const tocPath = resolveHref(tocItem.href);
+      const tocEntry = zip.getEntry(tocPath);
+      if (tocEntry) {
+        tocTitles = parseTocTitles(tocEntry.getData().toString('utf-8'), path.posix.dirname(tocPath));
+      }
     }
   }
 
@@ -315,7 +469,8 @@ export function parseEpub(buffer: Buffer): EpubBook {
     const item = opf.manifest.get(idref);
     if (!item) continue;
     if (!/x?html/i.test(item.mediaType) && !/\.x?html?$/i.test(item.href)) continue;
-    const entry = zip.getEntry(resolveHref(item.href));
+    const entryPath = resolveHref(item.href);
+    const entry = zip.getEntry(entryPath);
     if (!entry) continue;
 
     const xhtml = entry.getData().toString('utf-8');
@@ -326,8 +481,8 @@ export function parseEpub(buffer: Buffer): EpubBook {
     if (charCount < MIN_CHAPTER_CHARS) continue;
 
     const nextIndex = chapters.length + 1;
-    // Title priority: NCX entry > in-body heading > <title> tag (if distinct from book title) > "Chapter N"
-    let title = ncxTitles.get(item.href) ?? null;
+    // Title priority: TOC entry > in-body heading > <title> tag (if distinct from book title) > "Chapter N"
+    let title = tocTitles.get(entryPath) ?? null;
     if (!title && extractedTitle) {
       const looksLikeBookTitle = extractedTitle.toLowerCase().trim() === normalizedBookTitle ||
         normalizedBookTitle.startsWith(extractedTitle.toLowerCase().trim());
