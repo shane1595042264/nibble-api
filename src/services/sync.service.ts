@@ -205,7 +205,12 @@ export const syncService = {
       if (sec.chapterId && isValidUuid(sec.chapterId as string)) referencedChapterIds.add(sec.chapterId as string);
     }
     const existingChapters = await chapterRepository.findByIds([...referencedChapterIds]);
-    const existingChapterIdSet = new Set(existingChapters.map((c) => c.id));
+    // chapterId -> bookId for every chapter a pushed section may attach to. Security: only
+    // chapters under a book this user owns (plus chapters this push creates, added below),
+    // so a section can't be inserted under another user's chapter.
+    const parentChapterBookIds = new Map(
+      existingChapters.filter((c) => existingBookIdSet.has(c.bookId)).map((c) => [c.id, c.bookId]),
+    );
 
     // Pre-load exercise progress into a Map for O(1) lookup by id
     const serverProgressRecords = await exerciseRepository.findProgressByUserId(userId);
@@ -320,6 +325,8 @@ export const syncService = {
         const server = serverChapterMap.get(clientChapter.id) ?? null;
         if (!server) {
           await chapterRepository.create(coerced as any);
+          const bookId = clientChapter.bookId as string;
+          if (isValidUuid(bookId) && existingBookIdSet.has(bookId)) parentChapterBookIds.set(clientChapter.id, bookId);
         } else {
           // Security: server row's parent book must be owned by the authenticated user.
           // existingBookIdSet was built from books filtered by userId, so this enforces ownership.
@@ -342,16 +349,16 @@ export const syncService = {
       }
     }
 
-    // After processing chapters, update the existence set so sections aren't skipped
+    // After processing chapters: a chapter this push deletes, or a tombstoned one, must not
+    // become a parent for sections. A pushed id is never added here — it only counts if it
+    // was loaded above under an owned book or created by the chapters loop.
     for (const clientChapter of payload.changes.chapters) {
-      if (!isValidUuid(clientChapter.id)) continue;
-      // A tombstoned chapter must not become a parent for new sections either.
       if (clientChapter.deletedAt || serverChapterMap.get(clientChapter.id)?.deletedAt) {
-        existingChapterIdSet.delete(clientChapter.id);
-      } else {
-        existingChapterIdSet.add(clientChapter.id);
+        parentChapterBookIds.delete(clientChapter.id);
       }
     }
+    // A section whose chapter failed to write this push is failed too, so the client retries both.
+    const failedChapterIds = new Set(failedEntities.chapters);
 
     // Sections (with reading-progress special rule)
     for (const clientSection of payload.changes.sections) {
@@ -366,9 +373,13 @@ export const syncService = {
         if (clientSection.bookId && isValidUuid(clientSection.bookId as string)) {
           if (!existingBookIdSet.has(clientSection.bookId as string)) continue;
         }
-        // Skip if chapterId is invalid or chapter doesn't exist
-        if (clientSection.chapterId && isValidUuid(clientSection.chapterId as string)) {
-          if (!existingChapterIdSet.has(clientSection.chapterId as string)) continue;
+        // Skip unless chapterId is a live chapter of this section's own (owned) book. A new
+        // section is inserted with bookId/chapterId verbatim, and both FKs would accept a
+        // foreign chapter or a chapter of a different book.
+        const parentBookId = parentChapterBookIds.get(clientSection.chapterId as string);
+        if (parentBookId === undefined || parentBookId !== clientSection.bookId) {
+          if (failedChapterIds.has(clientSection.chapterId as string)) failedEntities.sections.push(clientSection.id);
+          continue;
         }
         const coerced = coerceDates(clientSection);
         const server = serverSectionMap.get(clientSection.id) ?? null;
