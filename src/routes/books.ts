@@ -5,6 +5,7 @@ import { AppError } from '../lib/errors.js';
 import { config } from '../lib/config.js';
 import { HAIKU_MODEL } from '../lib/ai-models.js';
 import { assertUuidPathParam } from '../lib/query-guards.js';
+import { parseTocSuggestions } from '../lib/toc-suggestions.js';
 
 export const bookRoutes = new Hono();
 
@@ -494,38 +495,40 @@ Now parse the following TOC:`,
     }
 
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
-    const client = new Anthropic({ timeout: 30_000 });
-    const response = await client.messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userContent }],
-    });
+    // tocPages accepts up to 20 pages (suggestStructureSchema), and a dense nested TOC
+    // blows well past 4096 output tokens. Raising the cap alone would only trade a
+    // truncation for a timeout — Haiku emits on the order of 100 tok/s, so 30s never
+    // covered 4096 tokens either — hence both move together.
+    const client = new Anthropic({ timeout: 120_000 });
+    let response;
+    try {
+      response = await client.messages.create({
+        model: HAIKU_MODEL,
+        max_tokens: 16384,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }],
+      });
+    } catch (err) {
+      // Timeout / 429 / overloaded are all the AI leg failing, not the caller's request.
+      // Without this they reach the generic branch of error-handler.ts as a 500.
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new AppError('AI_ERROR', `Could not reach the AI to read this table of contents: ${detail}`, 502);
+    }
 
     const textBlock = response.content.find((b: any) => b.type === 'text');
     if (!textBlock || textBlock.type !== 'text') {
       throw new AppError('AI_ERROR', 'No text response from Claude', 502);
     }
 
-    // Parse JSON from response (handle possible markdown fences)
-    let jsonStr = textBlock.text.trim();
-    if (jsonStr.startsWith('```')) {
-      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    }
-
-    const suggestions = JSON.parse(jsonStr) as {
-      chapters: Array<{
-        title: string;
-        startPage: number;
-        endPage: number;
-        sections?: Array<{ title: string; startPage: number; endPage: number }>;
-      }>;
-    };
+    // Parse + shape-check the model's reply. Every failure in here classifies as
+    // AI_ERROR/502 rather than leaking a SyntaxError (-> 400 'Invalid JSON body') or a
+    // TypeError (-> 500) that blames the caller for the model's output. See KAN-313.
+    const suggestions = parseTocSuggestions(textBlock.text, response.stop_reason);
 
     // Flatten nested structure using > prefix for chapter accordion display
     const flatChapters: Array<{ title: string; startPage: number; endPage: number }> = [];
     for (const ch of suggestions.chapters) {
-      if (ch.sections && ch.sections.length > 0) {
+      if (Array.isArray(ch.sections) && ch.sections.length > 0) {
         for (const sec of ch.sections) {
           flatChapters.push({
             title: `${ch.title} > ${sec.title}`,
