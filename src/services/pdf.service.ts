@@ -1,9 +1,11 @@
 /**
  * Backend PDF service — mirrors the frontend's PDFService but for Node.js.
  * Uses pdfjs-dist legacy build (no DOM required for text extraction).
- * Canvas (node-canvas) only used for renderPageToImage (OCR/cover).
+ * Canvas (@napi-rs/canvas) only used for renderPageToImage (OCR/cover).
+ * Must stay @napi-rs/canvas: pdfjs-dist 5 resolves white-only rasters against a
+ * node-canvas context without throwing (KAN-315).
  */
-import { createCanvas } from 'canvas';
+import { createCanvas } from '@napi-rs/canvas';
 import type { RawTextItem, RawPageData } from '../lib/nib/parser.js';
 
 const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -18,6 +20,21 @@ export interface OutlineItem {
   title: string;
   pageNumber: number | null;
   children: OutlineItem[];
+}
+
+/**
+ * True when the raster carries no ink at all — every pixel is transparent or
+ * (near-)white. pdf.js resolves its render promise even when the canvas backend
+ * silently drew nothing, so this is the only signal that a render failed.
+ */
+function isBlankRaster(context: any, width: number, height: number): boolean {
+  if (width < 1 || height < 1) return true;
+  const { data } = context.getImageData(0, 0, width, height);
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) continue;
+    if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) return false;
+  }
+  return true;
 }
 
 // ─── Document loading ──────────────────────────────────────────────
@@ -189,13 +206,18 @@ export const pdfService = {
     const page = await doc.getPage(pageNumber);
     const viewport = page.getViewport({ scale });
 
-    const canvas = createCanvas(viewport.width, viewport.height);
+    // @napi-rs/canvas wants integer dimensions; viewport sizes are fractional.
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
     const context = canvas.getContext('2d');
 
     await page.render({
       canvasContext: context as any,
       viewport,
     }).promise;
+
+    if (isBlankRaster(context, canvas.width, canvas.height)) {
+      throw new Error(`PDF page ${pageNumber} rendered to a blank raster`);
+    }
 
     return canvas.toBuffer('image/png');
   },

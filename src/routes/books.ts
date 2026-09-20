@@ -426,7 +426,7 @@ bookRoutes.post('/:id/suggest-structure', async (c) => {
           mediaType: 'image/png',
         });
       } catch {
-        // node-canvas failed — fall back to text for all pages
+        // Page render failed or came back blank — fall back to text for all pages
         useImages = false;
         break;
       }
