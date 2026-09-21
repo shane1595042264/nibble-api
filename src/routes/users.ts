@@ -137,9 +137,12 @@ userRoutes.post('/me/password', async (c) => {
   if (!full) throw new AppError('NOT_FOUND', 'User not found', 404);
 
   if (full.passwordHash) {
-    // Rate limit only applies to the change-password branch, and only counts failed
-    // bcrypt.compare attempts — not schema-validation errors. Initial-password set
-    // (OAuth users with no password yet) is not rate-limited at all.
+    // Guessing guard: counts only failed bcrypt.compare attempts, not schema
+    // errors, and only on the change branch — an initial set (OAuth user, no
+    // password yet) has nothing to guess. It deliberately does NOT tick on a
+    // correct password, so it is not a cost guard; index.ts caps this route at
+    // 10/hour for that (KAN-317). Both apply: this one locks out an attacker
+    // probing passwords, the limiter bounds the bcrypt work either way.
     const lockoutKey = `password:${user.id}`;
     const lock = checkFailureLockout(lockoutKey, PASSWORD_MAX_FAILURES, PASSWORD_FAILURE_WINDOW_MS);
     if (lock.locked) {

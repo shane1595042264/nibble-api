@@ -86,7 +86,17 @@ app.on(['GET', 'HEAD'], '/processing/*', rateLimiter(240));
 app.on('POST', '/processing/*', rateLimiter(30));
 app.use('/billing/*', authMiddleware, rateLimiter(10, 60_000));
 app.use('/users/me/avatar', authMiddleware, rateLimiter(5, 3600000));
-app.use('/users/*', authMiddleware);
+// Password changes are the most expensive request the API serves: bcryptjs is
+// pure JS with no thread pool, so compare + hash at rounds=12 blocks the single
+// Node process for ~375ms. users.ts's checkFailureLockout only ticks on WRONG
+// passwords, so replaying a CORRECT one (newPassword === currentPassword) is
+// idempotent, never locks out, and at ~3 req/s saturates the whole API. This
+// limiter caps the cost; the lockout still guards guessing. Must stay above the
+// broad /users/* line so the specific path is registered first (KAN-317).
+app.use('/users/me/password', authMiddleware, rateLimiter(10, 3600000));
+// /users/me is fetched on mount only (avatar resolution + the settings page),
+// never polled, so a /settings-sized cap sits well above the client's floor.
+app.use('/users/*', authMiddleware, rateLimiter(30));
 app.use('/admin/*', authMiddleware, adminMiddleware);
 
 app.route('/users', userRoutes);

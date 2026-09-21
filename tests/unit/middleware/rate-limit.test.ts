@@ -2,12 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { rateLimiter } from '../../../src/middleware/rate-limit.js';
 import { AppError } from '../../../src/lib/errors.js';
 
-// Minimal stub of the Hono context: the middleware only reads c.get('user')
-// and c.req.header('x-forwarded-for').
+// Minimal stub of the Hono context: the middleware reads c.get('user') and
+// c.req.header('x-forwarded-for'), and calls c.header() on the refusal path.
+const headersSet: Record<string, string> = {};
+
 function makeCtx(userId: string | null) {
   return {
     get: (k: string) => (k === 'user' && userId ? { id: userId } : undefined),
     req: { header: () => undefined },
+    header: (k: string, v: string) => { headersSet[k] = v; },
   } as any;
 }
 
@@ -27,6 +30,7 @@ async function hit(mw: (c: any, n: any) => Promise<void>, userId: string): Promi
 
 describe('rateLimiter store namespacing', () => {
   beforeEach(() => {
+    for (const k of Object.keys(headersSet)) delete headersSet[k];
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-04T12:00:00Z'));
   });
@@ -76,6 +80,19 @@ describe('rateLimiter store namespacing', () => {
 
     vi.advanceTimersByTime(61_000);
     expect(await hit(limiter, user)).toBe(true);
+  });
+
+  it('reports Retry-After as the time left on the oldest in-window hit', async () => {
+    const limiter = rateLimiter(2, 3_600_000);
+    const user = 'user-retry-after';
+
+    expect(await hit(limiter, user)).toBe(true);
+    vi.advanceTimersByTime(600_000); // 10 min later
+    expect(await hit(limiter, user)).toBe(true);
+
+    // Refused: the first hit expires 50 minutes from now, not 60.
+    expect(await hit(limiter, user)).toBe(false);
+    expect(headersSet['Retry-After']).toBe('3000');
   });
 
   it('keeps separate users isolated within one limiter', async () => {

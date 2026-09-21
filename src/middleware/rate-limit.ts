@@ -44,6 +44,13 @@ export function rateLimiter(maxRequests: number = 120, windowMs: number = 60000)
     entry.timestamps = entry.timestamps.filter(t => now - t < windowMs);
 
     if (entry.timestamps.length >= maxRequests) {
+      // Tell the caller when the budget frees up: the oldest in-window timestamp
+      // is the next one to expire. Hono merges headers set here into the response
+      // errorHandler builds from the throw. Without it an hour-long window looks
+      // identical to a minute-long one — the settings password form reads this
+      // header to say "try again in ~N minutes" (profile-settings.tsx).
+      const oldest = entry.timestamps[0]!;
+      c.header('Retry-After', String(Math.max(1, Math.ceil((windowMs - (now - oldest)) / 1000))));
       throw Errors.rateLimited();
     }
 
