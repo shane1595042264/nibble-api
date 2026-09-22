@@ -63,6 +63,7 @@ processingRoutes.post('/start', async (c) => {
     const job = await createJobOrConflict({
       fileHash: catalog.fileHash,
       userId: user.id,
+      bookId: book.id,
       status: 'pending',
       processingCostCents: 0,
       paid: true,
@@ -80,6 +81,7 @@ processingRoutes.post('/start', async (c) => {
   const job = await createJobOrConflict({
     fileHash: catalog.fileHash,
     userId: user.id,
+    bookId: book.id,
     status: 'pending',
     processingCostCents: (catalog.totalPages ?? 0) * 5,
   });

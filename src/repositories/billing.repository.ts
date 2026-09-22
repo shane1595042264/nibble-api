@@ -25,6 +25,10 @@ export const billingRepository = {
   async createJob(data: {
     fileHash: string;
     userId: string;
+    // Required, not optional: processing_jobs.book_id is nullable, so nothing at
+    // the DB level catches an omitted bookId. A NULL here makes the job
+    // un-retryable, skips cancel cleanup, and survives book hard-delete (KAN-319).
+    bookId: string;
     status?: string;
     progress?: number;
     processingCostCents?: number;
