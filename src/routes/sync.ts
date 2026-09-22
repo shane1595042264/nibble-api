@@ -4,6 +4,18 @@ import { syncService } from '../services/sync.service.js';
 import { AppError } from '../lib/errors.js';
 import { VIEW_MODES, READING_MODES, TRACKING_MODES } from './settings.js';
 import { SECTION_TITLE_MAX, SECTION_TYPE_MAX, SECTION_EXTRACTED_TEXT_MAX } from './sections.js';
+import { BOOK_CUSTOM_TITLE_MAX, BOOK_COVER_URL_MAX } from './books.js';
+import {
+  VOCAB_WORD_MAX,
+  VOCAB_PRONUNCIATION_MAX,
+  VOCAB_TRANSLATION_MAX,
+  VOCAB_TARGET_LANGUAGE_MAX,
+  VOCAB_DEFINITION_MAX,
+  VOCAB_CONTEXT_SENTENCE_MAX,
+  VOCAB_EXPLANATION_MAX,
+  VOCAB_BOOK_TITLE_MAX,
+  VOCAB_SECTION_TITLE_MAX,
+} from './vocabulary.js';
 
 export const syncRoutes = new Hono();
 
@@ -89,6 +101,57 @@ export const sectionBoundsSchema = z
     { message: 'Section startPage must be <= endPage' },
   );
 
+// Books and vocabulary reach the same columns as PUT /api/books/:id and
+// POST /api/vocabulary, which cap every text field and constrain
+// lastAccessedScrollProgress to [0, 1]. Without these the sync path is a
+// strictly weaker door onto those columns: a multi-MB string lands in Postgres
+// and is echoed back to every device on the next pull, and an out-of-range
+// progress corrupts Continue Reading restore (the unit bug KAN-114 fixed).
+//
+// Every field is .nullable() because the column is nullable and a fresh device
+// pushes the server's own rows straight back — see the re-queue note above.
+export const bookBoundsSchema = z
+  .object({
+    customTitle: z.string().max(BOOK_CUSTOM_TITLE_MAX).nullable().optional(),
+    // Length only, no .url(): the cap is what bounds the blast radius (a page-1
+    // PNG data: URL is megabytes), and a format check would reject any legacy
+    // non-URL value the server already stores, re-queueing it forever.
+    coverUrl: z.string().max(BOOK_COVER_URL_MAX).nullable().optional(),
+    lastAccessedScrollProgress: z
+      .union([z.null(), z.coerce.number().min(0).max(1)])
+      .optional(),
+    lastAccessedWordIndex: z.union([z.null(), z.coerce.number().int()]).optional(),
+  })
+  .passthrough();
+
+// NEW vocab rows fan out to the append-only external knowledge base before the
+// local insert (sync.service.ts) and that KB exposes no DELETE or PATCH, so an
+// oversized field forwarded there is permanent. This filter runs in the route,
+// before syncService.sync() is called at all, which is what keeps an over-cap
+// row from ever reaching that irreversible call.
+//
+// Two REST constraints are deliberately NOT mirrored, both to avoid the
+// re-queue-forever trap:
+//  - page: REST requires .int().min(1), but prod holds a live row with page 0
+//    that the server emits in serverChanges and a fresh device pushes back.
+//    page is an integer column — no oversized write, no KB fan-out — so the
+//    bound would buy nothing and wedge a real row.
+//  - word: max is enforced, min(1) is not. word is NOT NULL but '' is a legal
+//    stored value, so a minimum is the same trap class.
+export const vocabBoundsSchema = z
+  .object({
+    word: z.string().max(VOCAB_WORD_MAX).nullable().optional(),
+    pronunciation: z.string().max(VOCAB_PRONUNCIATION_MAX).nullable().optional(),
+    translation: z.string().max(VOCAB_TRANSLATION_MAX).nullable().optional(),
+    targetLanguage: z.string().max(VOCAB_TARGET_LANGUAGE_MAX).nullable().optional(),
+    definition: z.string().max(VOCAB_DEFINITION_MAX).nullable().optional(),
+    contextSentence: z.string().max(VOCAB_CONTEXT_SENTENCE_MAX).nullable().optional(),
+    explanation: z.string().max(VOCAB_EXPLANATION_MAX).nullable().optional(),
+    bookTitle: z.string().max(VOCAB_BOOK_TITLE_MAX).nullable().optional(),
+    sectionTitle: z.string().max(VOCAB_SECTION_TITLE_MAX).nullable().optional(),
+  })
+  .passthrough();
+
 // Lenient settings: invalid enum/range values are silently dropped via .catch(undefined)
 // so a stale or buggy client can't permanently wedge sync. Unknown keys pass through
 // (passthrough) — the repository only writes columns known to Drizzle.
@@ -109,6 +172,10 @@ export const syncPayloadSchema = z.object({
     sections: z.array(syncSectionSchema).max(MAX_SYNC_SECTIONS).default([]),
     vocabulary: z.array(syncEntitySchema).max(MAX_SYNC_VOCABULARY).default([]),
     settings: syncSettingsSchema.nullable().default(null),
+    // exerciseProgress has no field bounds: exercise_progress is reachable
+    // through sync only — there is no REST route for it — so there are no
+    // limits to mirror, and inventing them here would be a new contract rather
+    // than a second door onto an existing one.
     exerciseProgress: z.array(syncEntitySchema).max(MAX_SYNC_EXERCISE_PROGRESS).default([]),
   }),
 });
@@ -161,28 +228,44 @@ syncRoutes.post('/', async (c) => {
     throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
   }
 
-  // Pre-filter chapters/sections against strict field-length bounds. Invalid
+  // Pre-filter each entity array against strict field-length bounds. Invalid
   // entries are dropped from the payload and their ids are surfaced via
   // failedEntities so the client retries on the next tick (matches the
   // existing sync contract — see sync.service.ts L155).
-  const preFilterFailed = { chapters: [] as string[], sections: [] as string[] };
-  const filteredChapters = parsed.data.changes.chapters.filter((ch) => {
-    if (chapterBoundsSchema.safeParse(ch).success) return true;
-    preFilterFailed.chapters.push(ch.id);
-    return false;
-  });
-  const filteredSections = parsed.data.changes.sections.filter((sec) => {
-    if (sectionBoundsSchema.safeParse(sec).success) return true;
-    preFilterFailed.sections.push(sec.id);
-    return false;
-  });
+  //
+  // This runs before syncService.sync(), which is load-bearing for vocabulary:
+  // a NEW word is forwarded to the append-only external knowledge base before
+  // the local insert, and that POST cannot be undone.
+  const preFilterFailed = {
+    books: [] as string[],
+    chapters: [] as string[],
+    sections: [] as string[],
+    vocabulary: [] as string[],
+  };
+  const filterBy = <T extends { id: string }>(
+    rows: T[],
+    schema: { safeParse: (v: unknown) => { success: boolean } },
+    failed: string[],
+  ): T[] =>
+    rows.filter((row) => {
+      if (schema.safeParse(row).success) return true;
+      failed.push(row.id);
+      return false;
+    });
+
+  const filteredBooks = filterBy(parsed.data.changes.books, bookBoundsSchema, preFilterFailed.books);
+  const filteredChapters = filterBy(parsed.data.changes.chapters, chapterBoundsSchema, preFilterFailed.chapters);
+  const filteredSections = filterBy(parsed.data.changes.sections, sectionBoundsSchema, preFilterFailed.sections);
+  const filteredVocabulary = filterBy(parsed.data.changes.vocabulary, vocabBoundsSchema, preFilterFailed.vocabulary);
 
   const cleanedPayload = {
     ...parsed.data,
     changes: {
       ...parsed.data.changes,
+      books: filteredBooks,
       chapters: filteredChapters,
       sections: filteredSections,
+      vocabulary: filteredVocabulary,
     },
   };
 
@@ -191,8 +274,10 @@ syncRoutes.post('/', async (c) => {
     ...result,
     failedEntities: {
       ...result.failedEntities,
+      books: [...result.failedEntities.books, ...preFilterFailed.books],
       chapters: [...result.failedEntities.chapters, ...preFilterFailed.chapters],
       sections: [...result.failedEntities.sections, ...preFilterFailed.sections],
+      vocabulary: [...result.failedEntities.vocabulary, ...preFilterFailed.vocabulary],
     },
   });
 });

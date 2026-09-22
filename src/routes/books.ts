@@ -20,20 +20,28 @@ function sanitizeFilename(name: string, maxLength = 100): string {
     .trim() || 'download';
 }
 
+// ─── Field limits ──────────────────────────────────────────────────
+
+// Exported so POST /sync can bound the same columns with the same numbers
+// instead of duplicating literals that would silently drift apart.
+// Precedent: SECTION_TITLE_MAX & co. in sections.ts, imported by sync.ts.
+export const BOOK_CUSTOM_TITLE_MAX = 500;
+export const BOOK_COVER_URL_MAX = 2048;
+
 // ─── Zod schemas ───────────────────────────────────────────────────
 
 export const createBookSchema = z.object({
   catalogId: z.string().uuid(),
-  customTitle: z.string().max(500).optional(),
-  coverUrl: z.string().url().max(2048).optional(),
+  customTitle: z.string().max(BOOK_CUSTOM_TITLE_MAX).optional(),
+  coverUrl: z.string().url().max(BOOK_COVER_URL_MAX).optional(),
 });
 
 // processingStatus and structureSource are backend-managed (processing worker writes)
 // and intentionally omitted here. .strict() makes clients get a 400 when they send
 // any unlisted field rather than having it silently stripped.
 export const updateBookSchema = z.object({
-  customTitle: z.string().max(500).optional(),
-  coverUrl: z.string().url().max(2048).optional(),
+  customTitle: z.string().max(BOOK_CUSTOM_TITLE_MAX).optional(),
+  coverUrl: z.string().url().max(BOOK_COVER_URL_MAX).optional(),
   lastReadAt: z.string().datetime().optional(),
   lastAccessedSectionId: z.string().uuid().optional(),
   lastAccessedScrollProgress: z.number().min(0).max(1).optional(),
