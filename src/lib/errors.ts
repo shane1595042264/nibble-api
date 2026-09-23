@@ -35,6 +35,20 @@ export const Errors = {
 };
 
 /**
+ * Copy for the 409 raised when idx_processing_jobs_active_file_hash — a partial
+ * unique index on file_hash ALONE, not user-scoped — is already held by an
+ * in-flight job for the same content-addressed file.
+ *
+ * Two audiences need two sentences. The retry path has a Retry button to point
+ * the user back at; an uploader has none and has to pick the file again, so
+ * telling them "Retry will work" points at a button that isn't on screen
+ * (KAN-322). The upload copy is deliberately impersonal — the colliding job may
+ * belong to a different account, and that must not leak.
+ */
+export const ACTIVE_JOB_CONFLICT = 'This file is already being processed — it will finish shortly, then Retry will work';
+export const ACTIVE_JOB_UPLOAD_CONFLICT = 'This file is already being processed — it will finish shortly. Please try uploading it again in a few minutes.';
+
+/**
  * True when `err` — or anything on its cause chain — carries the given SQLSTATE.
  *
  * Drizzle wraps every driver rejection in a DrizzleQueryError whose own `code`

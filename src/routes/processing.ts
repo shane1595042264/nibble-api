@@ -11,7 +11,7 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { sectionRepository } from '../repositories/section.repository.js';
 import { eq } from 'drizzle-orm';
 import { storageService } from '../services/storage.service.js';
-import { AppError, Errors, isUniqueViolation } from '../lib/errors.js';
+import { ACTIVE_JOB_CONFLICT, AppError, Errors, isUniqueViolation } from '../lib/errors.js';
 import { hasFreeAiAccess } from '../lib/billing-access.js';
 import { assertUuidPathParam } from '../lib/query-guards.js';
 
@@ -20,9 +20,9 @@ export const processingRoutes = new Hono();
 // idx_processing_jobs_active_file_hash is a partial unique index on file_hash
 // alone — not user-scoped — and file_hash is content-addressed, so an active job
 // started by ANY user for the same file blocks this insert. Turn the resulting
-// 23505 into an actionable 409 instead of an opaque 500 (KAN-302).
-const ACTIVE_JOB_CONFLICT = 'This file is already being processed — it will finish shortly, then Retry will work';
-
+// 23505 into an actionable 409 instead of an opaque 500 (KAN-302). The copy now
+// lives in lib/errors.ts so the upload path raises the same class of 409 for the
+// same index (KAN-322).
 async function createJobOrConflict(data: Parameters<typeof billingRepository.createJob>[0]) {
   try {
     return await billingRepository.createJob(data);

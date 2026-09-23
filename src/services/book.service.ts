@@ -5,8 +5,50 @@ import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { processingLogRepository } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
 import { processingJobs, pdfFiles, sections as sectionsTable, chapters as chaptersTable } from '../db/schema.js';
-import { eq, or, and } from 'drizzle-orm';
-import { Errors } from '../lib/errors.js';
+import { eq } from 'drizzle-orm';
+import { ACTIVE_JOB_UPLOAD_CONFLICT, Errors, isUniqueViolation } from '../lib/errors.js';
+
+type UploadTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Resolve the active job for this file, refusing to adopt one owned by someone else.
+ *
+ * file_hash is content-addressed and a catalog row is deliberately shared across
+ * users (schema.ts userCount / incrementCatalogUserCount), so two users uploading
+ * the same textbook is a designed-for scenario. But the job index is global, and
+ * another user's in-flight job is not merely a blocker for our insert — it is
+ * unreadable to us: GET /processing/:jobId rejects a foreign job with a permanent
+ * 404. Handing its id back to the uploader left their book at 'pending' forever
+ * behind a Retry button that could only 404 again (KAN-322), so a foreign holder
+ * is now an honest 409.
+ *
+ * Returns the caller's OWN active job when there is one, which is the same-user
+ * dedup that stops a double upload from starting a second pipeline.
+ */
+async function resolveOwnActiveJob(fileHash: string, userId: string, executor?: UploadTx) {
+  const activeJob = await processingLogRepository.findActiveJobByFileHash(fileHash, executor ?? db);
+  if (activeJob && activeJob.userId !== userId) {
+    throw Errors.conflict(ACTIVE_JOB_UPLOAD_CONFLICT);
+  }
+  return activeJob;
+}
+
+/**
+ * Run an upload's job-creating transaction, mapping the global index's 23505 to
+ * the same 409 the pre-check raises.
+ *
+ * resolveOwnActiveJob can still lose to a job that commits after its SELECT. The
+ * transaction is already rolled back by the time we get here, so nothing
+ * half-built survives the conflict (same net as the retry path, KAN-302).
+ */
+async function createJobTx<T>(run: (tx: UploadTx) => Promise<T>): Promise<T> {
+  try {
+    return await db.transaction(run);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    throw Errors.conflict(ACTIVE_JOB_UPLOAD_CONFLICT);
+  }
+}
 
 /** Start the processing pipeline in a fire-and-forget manner. */
 function startPipelineAsync(jobId: string, fileHash: string, bookId: string, mode: string) {
@@ -192,28 +234,22 @@ export const bookService = {
     const existing = await bookRepository.findByUserIdAndCatalogId(userId, catalogEntry.id);
 
     if (existing) {
-      const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
-        // Check for active job inside the transaction
-        const [activeJob] = await tx
-          .select()
-          .from(processingJobs)
-          .where(
-            and(
-              eq(processingJobs.fileHash, fileHash),
-              or(
-                eq(processingJobs.status, 'pending'),
-                eq(processingJobs.status, 'processing'),
-              ),
-            ),
-          )
-          .limit(1);
+      const { jobId, shouldStartPipeline } = await createJobTx(async (tx) => {
+        // Nothing to process for a book that's already finished. Checked BEFORE
+        // the active-job lookup so re-uploading a book you've already completed
+        // stays the no-op it has always been, rather than turning into a 409 on
+        // someone else's unrelated in-flight job for the same file (KAN-322).
+        if (existing.processingStatus === 'complete') {
+          return { jobId: undefined, shouldStartPipeline: false };
+        }
+
+        // Check for an active job inside the transaction. Only our own job can be
+        // adopted; a foreign one throws 409. Nothing in this branch has been
+        // mutated yet, so the throw leaves the book exactly as it was.
+        const activeJob = await resolveOwnActiveJob(fileHash, userId, tx);
 
         if (activeJob) {
           return { jobId: activeJob.id, shouldStartPipeline: false };
-        }
-
-        if (existing.processingStatus === 'complete') {
-          return { jobId: undefined, shouldStartPipeline: false };
         }
 
         // Insert new job — partial unique index prevents duplicates
@@ -235,6 +271,15 @@ export const bookService = {
       return { book: existing, catalogEntry, jobId, isNew: false };
     }
 
+    // Both paths below mutate before they reach their transaction: the restore
+    // path hard-deletes the old chapters/sections and clears deletedAt, and the
+    // new-book path inserts a books row and bumps the catalog's userCount. A 409
+    // raised from inside those transactions would roll back only the job insert
+    // and leave a stripped or orphaned book behind — the exact permanent
+    // 'pending' this fixes — so the collision is caught here, before any of it
+    // (KAN-322). Their in-transaction checks still run, to close the race.
+    await resolveOwnActiveJob(fileHash, userId);
+
     // Check for soft-deleted book with the same user+catalog (re-upload after delete)
     const deleted = await bookRepository.findDeletedByUserIdAndCatalogId(userId, catalogEntry.id);
 
@@ -251,20 +296,8 @@ export const bookService = {
         throw Errors.processingFailed('Failed to restore previously deleted book during re-upload');
       }
 
-      const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
-        const [activeJob] = await tx
-          .select()
-          .from(processingJobs)
-          .where(
-            and(
-              eq(processingJobs.fileHash, fileHash),
-              or(
-                eq(processingJobs.status, 'pending'),
-                eq(processingJobs.status, 'processing'),
-              ),
-            ),
-          )
-          .limit(1);
+      const { jobId, shouldStartPipeline } = await createJobTx(async (tx) => {
+        const activeJob = await resolveOwnActiveJob(fileHash, userId, tx);
 
         if (activeJob) {
           return { jobId: activeJob.id, shouldStartPipeline: false };
@@ -302,20 +335,8 @@ export const bookService = {
     }
 
     // Atomically create processing job for the new book
-    const { jobId, shouldStartPipeline } = await db.transaction(async (tx) => {
-      const [activeJob] = await tx
-        .select()
-        .from(processingJobs)
-        .where(
-          and(
-            eq(processingJobs.fileHash, fileHash),
-            or(
-              eq(processingJobs.status, 'pending'),
-              eq(processingJobs.status, 'processing'),
-            ),
-          ),
-        )
-        .limit(1);
+    const { jobId, shouldStartPipeline } = await createJobTx(async (tx) => {
+      const activeJob = await resolveOwnActiveJob(fileHash, userId, tx);
 
       if (activeJob) {
         return { jobId: activeJob.id, shouldStartPipeline: false };

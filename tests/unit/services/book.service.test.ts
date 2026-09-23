@@ -23,7 +23,7 @@ vi.mock('../../../src/repositories/section.repository.js', () => ({ sectionRepos
 vi.mock('../../../src/repositories/vocabulary.repository.js', () => ({ vocabularyRepository: {} }));
 
 // processing-log.repository: startPipelineAsync's catch calls failJob (KAN-279).
-const processingLogRepo = vi.hoisted(() => ({ failJob: vi.fn() }));
+const processingLogRepo = vi.hoisted(() => ({ failJob: vi.fn(), findActiveJobByFileHash: vi.fn() }));
 vi.mock('../../../src/repositories/processing-log.repository.js', () => ({ processingLogRepository: processingLogRepo }));
 
 // processing.service is dynamically imported by startPipelineAsync. Stub
@@ -105,6 +105,7 @@ describe('bookService.handleUpload re-upload-after-delete restore edge', () => {
     bookRepo.findByUserIdAndCatalogId.mockReset();
     bookRepo.findDeletedByUserIdAndCatalogId.mockReset();
     bookRepo.restore.mockReset();
+    processingLogRepo.findActiveJobByFileHash.mockReset().mockResolvedValue(null);
     db.select.mockReset();
     db.delete.mockReset();
 
@@ -155,6 +156,7 @@ describe('startPipelineAsync failure net (KAN-279)', () => {
     bookRepo.findByUserIdAndCatalogId.mockReset();
     db.select.mockReset();
     processingLogRepo.failJob.mockReset().mockResolvedValue(undefined);
+    processingLogRepo.findActiveJobByFileHash.mockReset().mockResolvedValue(null);
     processingSvc.orchestratePipeline.mockReset();
     processingSvc.markBookErrored.mockReset().mockResolvedValue(undefined);
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -206,5 +208,146 @@ describe('startPipelineAsync failure net (KAN-279)', () => {
     expect(errorSpy.mock.calls.some(([m]) => String(m).includes('job-new'))).toBe(true);
     // Book rescue still runs despite the failJob failure.
     expect(processingSvc.markBookErrored).toHaveBeenCalledWith('book-existing', 'job-new');
+  });
+});
+
+// KAN-322: file_hash is content-addressed and the catalog row is shared across
+// users, so two users uploading the same textbook is designed-for. The upload
+// path used to hand uploader B the id of A's in-flight job, which B can never
+// read (GET /processing/:jobId 404s on a foreign job) — stranding B's book at
+// 'pending' forever behind a dead Retry button. A foreign holder of the global
+// index must be an honest 409 that leaves nothing half-built behind.
+describe('bookService.handleUpload cross-user active-job collision (KAN-322)', () => {
+  const FILE_HASH = 'hash-shared-textbook';
+  const CAT = { id: 'cat-shared', userCount: 7 };
+  const FOREIGN_JOB = { id: 'job-owned-by-user-2', userId: 'user-2' };
+  const OWN_JOB = { id: 'job-owned-by-user-1', userId: USER_ID };
+  let activeJobRow: { id: string; userId: string } | null = null;
+
+  beforeEach(() => {
+    bookRepo.findCatalogByHash.mockReset().mockResolvedValue(CAT);
+    bookRepo.touchCatalog.mockReset().mockResolvedValue(undefined);
+    bookRepo.incrementCatalogUserCount.mockReset().mockResolvedValue(CAT);
+    bookRepo.findByUserIdAndCatalogId.mockReset().mockResolvedValue(null);
+    bookRepo.findDeletedByUserIdAndCatalogId.mockReset().mockResolvedValue(null);
+    bookRepo.restore.mockReset();
+    bookRepo.create.mockReset().mockResolvedValue({ id: 'book-b', userId: USER_ID, catalogId: CAT.id });
+    bookRepo.update.mockReset().mockResolvedValue(undefined);
+    processingLogRepo.findActiveJobByFileHash.mockReset().mockResolvedValue(null);
+    processingSvc.orchestratePipeline.mockReset().mockResolvedValue(undefined);
+    db.select.mockReset();
+    db.delete.mockReset().mockReturnValue({ where: () => Promise.resolve(undefined) });
+    activeJobRow = null;
+
+    // pdf_files row already present → skip the R2 upload.
+    db.select.mockReturnValue({
+      from: () => ({ where: () => ({ limit: () => Promise.resolve([{ id: 'file-shared' }]) }) }),
+    });
+    // Default transaction: insert yields a fresh job for this caller. tx.select
+    // serves the same row the repository lookup would, so these tests reproduce
+    // the pre-fix behaviour (which read the job with its own inline tx.select)
+    // rather than passing vacuously against it.
+    (db as any).transaction = vi.fn(async (cb: (tx: any) => unknown) =>
+      cb({
+        select: () => ({ from: () => ({ where: () => ({ limit: () => Promise.resolve(activeJobRow ? [activeJobRow] : []) }) }) }),
+        insert: () => ({ values: () => ({ returning: () => Promise.resolve([{ id: 'job-new' }]) }) }),
+      }),
+    );
+  });
+
+  /** Publish one active job through BOTH readers: the repository lookup the fix
+   *  uses and the inline tx.select the pre-fix code used. */
+  const setActiveJob = (job: { id: string; userId: string }) => {
+    activeJobRow = job;
+    processingLogRepo.findActiveJobByFileHash.mockResolvedValue(job);
+  };
+
+  const upload = () => bookService.handleUpload(USER_ID, FILE_HASH, Buffer.from('x'), 10, 'Shared Textbook');
+
+  it('rejects with 409 instead of adopting another user\'s job id', async () => {
+    setActiveJob(FOREIGN_JOB);
+
+    await expect(upload()).rejects.toMatchObject({ status: 409, code: 'CONFLICT' });
+    await expect(upload()).rejects.toThrow(/already being processed/i);
+  });
+
+  it('leaves NO orphan book row or catalog bump behind when it 409s', async () => {
+    setActiveJob(FOREIGN_JOB);
+
+    await expect(upload()).rejects.toMatchObject({ status: 409 });
+
+    // The whole point: the guard fires before any book-row mutation, so the
+    // uploader is not left with a pending book nobody will ever process.
+    expect(bookRepo.create).not.toHaveBeenCalled();
+    expect(bookRepo.incrementCatalogUserCount).not.toHaveBeenCalled();
+    expect(processingSvc.orchestratePipeline).not.toHaveBeenCalled();
+  });
+
+  it('never reaches the destructive restore path when the collision is foreign', async () => {
+    // A soft-deleted book exists, so without the early guard this upload would
+    // hard-delete its old chapters/sections and clear deletedAt before failing.
+    bookRepo.findDeletedByUserIdAndCatalogId.mockResolvedValue({ id: 'deleted-book-b' });
+    setActiveJob(FOREIGN_JOB);
+
+    await expect(upload()).rejects.toMatchObject({ status: 409 });
+
+    expect(bookRepo.restore).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+  });
+
+  it('does not touch an existing book\'s status when the collision is foreign', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue({ id: 'book-b', processingStatus: 'pending' });
+    setActiveJob(FOREIGN_JOB);
+
+    await expect(upload()).rejects.toMatchObject({ status: 409 });
+
+    expect(bookRepo.update).not.toHaveBeenCalled();
+    expect(processingSvc.orchestratePipeline).not.toHaveBeenCalled();
+  });
+
+  it('keeps re-uploading an already-complete book a no-op, even mid-collision', async () => {
+    // Regression guard for the fix's own ordering: the 'complete' short-circuit
+    // sits ABOVE the active-job lookup, so a stranger's in-flight job for the
+    // same file must not turn a harmless re-upload into an error.
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue({ id: 'book-b', processingStatus: 'complete' });
+    setActiveJob(FOREIGN_JOB);
+
+    const result = await upload();
+
+    expect(result.jobId).toBeUndefined();
+    expect(processingLogRepo.findActiveJobByFileHash).not.toHaveBeenCalled();
+  });
+
+  it('maps a 23505 lost race to the same 409, not an opaque 500', async () => {
+    // Pre-check saw nothing, then a concurrent insert committed first. Drizzle
+    // hangs the real PostgresError off .cause (KAN-302).
+    (db as any).transaction = vi.fn(async () => {
+      throw Object.assign(new Error('DrizzleQueryError'), {
+        cause: Object.assign(new Error('duplicate key value'), { code: '23505' }),
+      });
+    });
+
+    await expect(upload()).rejects.toMatchObject({ status: 409, code: 'CONFLICT' });
+  });
+
+  it('still returns YOUR OWN in-flight job id and starts no second pipeline', async () => {
+    setActiveJob(OWN_JOB);
+
+    const result = await upload();
+
+    expect(result.jobId).toBe(OWN_JOB.id);
+    await flush();
+    expect(processingSvc.orchestratePipeline).not.toHaveBeenCalled();
+  });
+
+  it('control arm: an upload with no active job processes normally', async () => {
+    processingLogRepo.findActiveJobByFileHash.mockResolvedValue(null);
+
+    const result = await upload();
+
+    expect(result.jobId).toBe('job-new');
+    expect(result.isNew).toBe(true);
+    await flush();
+    expect(processingSvc.orchestratePipeline).toHaveBeenCalledWith('job-new', FILE_HASH, 'book-b', 'full');
   });
 });
