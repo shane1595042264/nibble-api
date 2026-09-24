@@ -141,11 +141,22 @@ export const bookService = {
     const catalog = await bookRepository.findCatalogById(book.catalogId);
     if (!catalog) throw Errors.notFound('Catalog entry');
 
-    const updated = await bookRepository.updateCatalog(catalog.id, {
-      ...data,
+    // `title` is dropped on purpose. book_catalog is shared across every user holding the
+    // same file_hash, and this route only authorizes "the book is on your shelf" — so a
+    // personal rename here renamed the book for everyone, rewrote the Marketplace listing
+    // and poisoned the fuzzy upload dedup. Renames belong in the per-user books.custom_title
+    // (carried by /sync); catalog titles stay admin-only via PUT /admin/catalog/:id.
+    // The route schema still accepts title so older deployed clients don't start 400ing.
+    const { title: _ignoredTitle, ...catalogData } = data;
+    const patch = {
+      ...catalogData,
       coverUrl: data.coverUrl ?? undefined,
       publishYear: data.publishYear ?? undefined,
-    });
+    };
+    // Nothing left to write — don't touch the shared row (not even its updated_at).
+    if (Object.values(patch).every((v) => v === undefined)) return { book, catalog };
+
+    const updated = await bookRepository.updateCatalog(catalog.id, patch);
     return { book, catalog: updated };
   },
 

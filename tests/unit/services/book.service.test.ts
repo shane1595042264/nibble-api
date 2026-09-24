@@ -14,6 +14,7 @@ const bookRepo = vi.hoisted(() => ({
   findDeletedByUserIdAndCatalogId: vi.fn(),
   restore: vi.fn(),
   update: vi.fn(),
+  findById: vi.fn(),
 }));
 vi.mock('../../../src/repositories/book.repository.js', () => ({ bookRepository: bookRepo }));
 
@@ -349,5 +350,48 @@ describe('bookService.handleUpload cross-user active-job collision (KAN-322)', (
     expect(result.isNew).toBe(true);
     await flush();
     expect(processingSvc.orchestratePipeline).toHaveBeenCalledWith('job-new', FILE_HASH, 'book-b', 'full');
+  });
+});
+
+
+// Regression coverage for KAN-323: PUT /books/:id/metadata only authorizes "this book is
+// on your shelf", but book_catalog is SHARED across every user holding the same file_hash.
+// A personal rename therefore renamed the book for everyone, rewrote the Marketplace
+// listing and poisoned the fuzzy upload dedup. Renames belong in the per-user
+// books.custom_title; catalog titles stay admin-only (PUT /admin/catalog/:id).
+describe('bookService.updateBookMetadata never writes the shared catalog title (KAN-323)', () => {
+  const BOOK = { id: 'book-1', userId: USER_ID, catalogId: CATALOG_ID };
+
+  beforeEach(() => {
+    bookRepo.findById.mockReset().mockResolvedValue(BOOK);
+    bookRepo.findCatalogById.mockReset().mockResolvedValue({ id: CATALOG_ID, title: 'Shared Catalog Title' });
+    bookRepo.updateCatalog.mockReset().mockResolvedValue({ id: CATALOG_ID, title: 'Shared Catalog Title' });
+  });
+
+  it('drops title and writes nothing at all when title is the only field', async () => {
+    const result = await bookService.updateBookMetadata('book-1', USER_ID, { title: 'My Private Rename' });
+
+    expect(bookRepo.updateCatalog).not.toHaveBeenCalled();
+    // The unchanged catalog row is still returned, so the client response shape is stable.
+    expect(result.catalog).toMatchObject({ title: 'Shared Catalog Title' });
+  });
+
+  it('still writes the other fields, with title stripped from the patch', async () => {
+    await bookService.updateBookMetadata('book-1', USER_ID, { title: 'My Private Rename', author: 'New Author' });
+
+    expect(bookRepo.updateCatalog).toHaveBeenCalledTimes(1);
+    const [catalogId, patch] = bookRepo.updateCatalog.mock.calls[0];
+    expect(catalogId).toBe(CATALOG_ID);
+    expect(patch).not.toHaveProperty('title');
+    expect(patch.author).toBe('New Author');
+  });
+
+  it('rejects a book that is not on the caller shelf before touching the catalog', async () => {
+    bookRepo.findById.mockResolvedValue({ ...BOOK, userId: 'someone-else' });
+
+    await expect(
+      bookService.updateBookMetadata('book-1', USER_ID, { author: 'New Author' }),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(bookRepo.updateCatalog).not.toHaveBeenCalled();
   });
 });

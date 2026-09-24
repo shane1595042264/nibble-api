@@ -196,7 +196,10 @@ bookRoutes.delete('/:id', async (c) => {
   return c.json(book);
 });
 
-// PUT /:id/metadata — update catalog metadata (title, author, etc.)
+// PUT /:id/metadata — update shared catalog metadata (author, description, cover, etc.)
+// `title` is still accepted by the schema for backward compatibility with deployed
+// clients, but the service drops it: per-user renames live in books.custom_title and
+// catalog titles are admin-only (PUT /admin/catalog/:id).
 // title bound matches the structureSchema chapterItem (500); description gets the
 // most headroom because it can carry a paragraph or two.
 export const updateMetadataSchema = z.object({
