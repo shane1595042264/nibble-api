@@ -169,14 +169,19 @@ bookRoutes.get('/:id/download', async (c) => {
   if (!pdfFile) throw new AppError('NOT_FOUND', 'PDF file not found', 404);
 
   const { storageService } = await import('../services/storage.service.js');
-  const buffer = await storageService.downloadPdf(pdfFile.r2Key);
+  // Stream the R2 body straight through. Buffering it here cost ~2x the file
+  // size in heap per request, and the largest stored book is 77 MB (KAN-329).
+  const { stream, contentLength } = await storageService.openBookFileStream(pdfFile.r2Key);
 
   const isEpub = catalog.format === 'epub';
   const contentType = isEpub ? 'application/epub+zip' : 'application/pdf';
   const ext = isEpub ? 'epub' : 'pdf';
   c.header('Content-Type', contentType);
   c.header('Content-Disposition', `attachment; filename="${sanitizeFilename(catalog.title || 'book')}.${ext}"`);
-  return c.body(new Uint8Array(buffer));
+  // Set Content-Length explicitly so streaming does not silently downgrade the
+  // response to chunked encoding — clients keep seeing the same headers as before.
+  if (contentLength !== undefined) c.header('Content-Length', String(contentLength));
+  return c.body(stream);
 });
 
 // GET /:id/summary — get book with catalog info for sync

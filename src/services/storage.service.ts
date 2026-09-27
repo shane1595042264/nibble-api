@@ -64,6 +64,26 @@ export const storageService = {
     return Buffer.concat(chunks);
   },
 
+  /**
+   * Open a book file as a web ReadableStream instead of a Buffer, so a caller
+   * can pipe R2 straight to the client without ever holding the whole file in
+   * heap. transformToWebStream() is Readable.toWeb() under the hood, so
+   * backpressure is preserved and memory stays at one chunk regardless of file
+   * size. contentLength comes from R2 rather than pdf_files.size_bytes so the
+   * Content-Length we advertise always matches the bytes we are about to send.
+   *
+   * downloadPdf() above stays for the callers that hand the whole file to
+   * pdf.js or the EPUB parser and genuinely need it materialised.
+   */
+  async openBookFileStream(r2Key: string): Promise<{ stream: ReadableStream; contentLength?: number }> {
+    const res = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: r2Key }));
+    if (!res.Body) throw new Error(`R2 object has no body: ${r2Key}`);
+    return {
+      stream: res.Body.transformToWebStream(),
+      contentLength: res.ContentLength,
+    };
+  },
+
   async getNibUrl(r2Key: string): Promise<string> {
     return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: r2Key }), { expiresIn: 3600 });
   },
