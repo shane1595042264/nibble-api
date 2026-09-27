@@ -36,7 +36,7 @@ async function createJobOrConflict(data: Parameters<typeof billingRepository.cre
 processingRoutes.post('/start', async (c) => {
   const user = c.get('user');
   const body = await c.req.json();
-  const { bookId } = z.object({ bookId: z.string() }).parse(body);
+  const { bookId } = z.object({ bookId: z.string().uuid() }).parse(body);
 
   // Verify book ownership
   const book = await bookService.getBook(bookId, user.id);

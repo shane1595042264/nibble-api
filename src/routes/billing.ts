@@ -5,7 +5,7 @@ import { billingService } from '../services/billing.service.js';
 export const billingRoutes = new Hono();
 
 const createPaymentSchema = z.object({
-  jobId: z.string(),
+  jobId: z.string().uuid(),
 });
 
 // Create payment intent
