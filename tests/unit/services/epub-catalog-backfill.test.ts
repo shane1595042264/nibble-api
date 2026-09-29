@@ -17,6 +17,7 @@ const {
   updateJobProgressMock,
   completeJobMock,
   failJobMock,
+  isJobActiveMock,
   chapterCreateMock,
   sectionCreateMock,
 } = vi.hoisted(() => ({
@@ -30,6 +31,7 @@ const {
   updateJobProgressMock: vi.fn(),
   completeJobMock: vi.fn(),
   failJobMock: vi.fn(),
+  isJobActiveMock: vi.fn(),
   chapterCreateMock: vi.fn(),
   sectionCreateMock: vi.fn(),
 }));
@@ -68,6 +70,7 @@ vi.mock('../../../src/repositories/processing-log.repository.js', () => ({
     updateJobProgress: updateJobProgressMock,
     completeJob: completeJobMock,
     failJob: failJobMock,
+    isJobActive: isJobActiveMock,
     getJob: vi.fn(),
   },
 }));
@@ -118,6 +121,12 @@ function logMessages(): string[] {
 describe('EPUB pipeline catalog backfill (KAN-301)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The job-status writers are claim-based since KAN-332: a null return means
+    // the job went terminal and the pipeline must stop. These tests exercise a
+    // healthy run, so the job stays alive throughout.
+    updateJobProgressMock.mockResolvedValue({ id: 'job-1', status: 'processing' });
+    completeJobMock.mockResolvedValue({ id: 'job-1', status: 'completed' });
+    isJobActiveMock.mockResolvedValue(true);
     limitMock.mockResolvedValue([{ r2Key: 'epubs/test.epub', fileHash: 'hash-1' }]);
     downloadPdfMock.mockResolvedValue(Buffer.from('fake-epub'));
     chapterCreateMock.mockImplementation(async () => ({ id: 'chapter-x' }));

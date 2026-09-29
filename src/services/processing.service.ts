@@ -64,6 +64,53 @@ const REFUND_LOG: Record<RefundOutcome, { message: string; level: string }> = {
   },
 };
 
+/**
+ * Thrown to unwind a pipeline whose job is no longer active — in practice, one
+ * the user cancelled. Both pipelines' catch blocks recognise it and take the
+ * quiet exit (no failJob, no markBookErrored, no refund) instead of the failure
+ * tail, because whoever made the job terminal already wrote its outcome.
+ */
+class JobCancelledError extends Error {
+  constructor(jobId: string) {
+    super(`Processing job ${jobId} is no longer active — stopping pipeline`);
+    this.name = 'JobCancelledError';
+  }
+}
+
+/**
+ * Advance a job's progress, or bail out if it has gone terminal.
+ *
+ * Every stage boundary already ticks progress, so routing those ticks through
+ * here turns all of them into cancellation checkpoints for free — including the
+ * ones immediately before the two paid stages (Mathpix, Anthropic OCR). Nothing
+ * else in the pipeline had any cancellation awareness before KAN-332.
+ */
+async function advance(jobId: string, progress: number, stage: string): Promise<void> {
+  const updated = await processingLogRepository.updateJobProgress(jobId, progress, stage);
+  if (!updated) throw new JobCancelledError(jobId);
+}
+
+/**
+ * Cancellation checkpoint that does not write a progress row. Used inside the
+ * paid per-page loops, whose own progress ticks only fire at the end of each
+ * iteration — without these, a cancel still pays for the whole in-flight batch.
+ */
+async function assertJobActive(jobId: string): Promise<void> {
+  if (!(await processingLogRepository.isJobActive(jobId))) {
+    throw new JobCancelledError(jobId);
+  }
+}
+
+/**
+ * Shared quiet exit for a cancelled run: leave one log line explaining why the
+ * pipeline stopped, next to the 'cancel' entry cancelJob already wrote.
+ */
+async function logCancelledExit(jobId: string, stageLabel: string): Promise<void> {
+  await processingLogRepository
+    .append(jobId, 'cancel', `${stageLabel} stopped: job is no longer active (cancelled)`)
+    .catch((err) => console.error(`[processing] failed to log cancelled exit for job ${jobId}`, err));
+}
+
 async function refundAndLog(jobId: string): Promise<void> {
   const outcome = await billingService.refundFailedJob(jobId);
   const { message, level } = REFUND_LOG[outcome];
@@ -125,24 +172,29 @@ export const processingService = {
  * feature beyond being extracted from orchestratePipeline as a private fn.
  */
 async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: string, mode: string = 'full'): Promise<void> {
+    // Mirror of the pdfjs document below, visible to the exit paths. A cancel is
+    // now an expected way out of this pipeline, and bailing without destroying
+    // the document would leak a whole book's page cache on every cancel.
+    let openDoc: { destroy: () => Promise<void> } | null = null;
     try {
       // ── Stage 1: Download PDF (0-5%) ──────────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 0, 'download');
+      await advance(jobId, 0, 'download');
       await processingLogRepository.append(jobId, 'download', 'Downloading PDF from storage...');
 
       const [pdfFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
       if (!pdfFile) throw new Error('PDF file not found in storage');
 
       const pdfBuffer = await storageService.downloadPdf(pdfFile.r2Key);
-      await processingLogRepository.updateJobProgress(jobId, 5, 'download');
+      await advance(jobId, 5, 'download');
       await processingLogRepository.append(jobId, 'download', `PDF downloaded (${(pdfBuffer.length / 1024 / 1024).toFixed(1)} MB)`);
 
       // ── Stage 2: Extract metadata (5-10%) ─────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 5, 'metadata');
+      await advance(jobId, 5, 'metadata');
       await processingLogRepository.append(jobId, 'metadata', 'Extracting PDF metadata...');
 
       // Load document ONCE and reuse for all stages
       const doc = await pdfService.loadDocument(pdfBuffer);
+      openDoc = doc;
       const totalPages = doc.numPages;
 
       let metadataTitle = 'unknown';
@@ -164,10 +216,10 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
         jobId, 'metadata',
         `Metadata extracted: ${totalPages} pages, title="${metadataTitle}", author="${metadataAuthor}"`,
       );
-      await processingLogRepository.updateJobProgress(jobId, 10, 'metadata');
+      await advance(jobId, 10, 'metadata');
 
       // ── Stage 3: Parse TOC (10-15%) ───────────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 10, 'toc');
+      await advance(jobId, 10, 'toc');
       await processingLogRepository.append(jobId, 'toc', 'Extracting table of contents...');
 
       const outline = await pdfService.extractOutlineFromDoc(doc);
@@ -179,10 +231,10 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
           ? `TOC found with ${outline.length} top-level entries`
           : 'No TOC found — will use batch structure',
       );
-      await processingLogRepository.updateJobProgress(jobId, 15, 'toc');
+      await advance(jobId, 15, 'toc');
 
       // ── Stage 4: Build structure (15-20%) ─────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 15, 'structure');
+      await advance(jobId, 15, 'structure');
       await processingLogRepository.append(jobId, 'structure', 'Building chapter/section structure...');
 
       if (hasToc && outline) {
@@ -191,11 +243,11 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
         await buildBatchStructure(jobId, bookId, totalPages);
       }
 
-      await processingLogRepository.updateJobProgress(jobId, 20, 'structure');
+      await advance(jobId, 20, 'structure');
       await processingLogRepository.append(jobId, 'structure', 'Structure built successfully');
 
       // ── Stage 5: Extract text (20-80%) ────────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 20, 'text_extraction');
+      await advance(jobId, 20, 'text_extraction');
       await processingLogRepository.append(jobId, 'text_extraction', 'Starting text extraction...');
 
       const allSections = await sectionRepository.findByBookId(bookId);
@@ -240,7 +292,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
         }
 
         const progress = Math.round(20 + ((i + 1) / totalSections) * 60);
-        await processingLogRepository.updateJobProgress(jobId, progress, 'text_extraction');
+        await advance(jobId, progress, 'text_extraction');
 
         if ((i + 1) % 5 === 0 || i === totalSections - 1) {
           await processingLogRepository.append(
@@ -253,11 +305,11 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
       // ── Stage 5b: Mathpix rich content (skip in toc-only mode) ──────
       if (mode === 'toc-only') {
         await processingLogRepository.append(jobId, 'mathpix', 'TOC-only mode — skipping Mathpix');
-        await processingLogRepository.updateJobProgress(jobId, 80, 'mathpix');
+        await advance(jobId, 80, 'mathpix');
       } else {
       const { mathpixService } = await import('./mathpix.service.js');
       if (mathpixService.isConfigured()) {
-        await processingLogRepository.updateJobProgress(jobId, 75, 'mathpix');
+        await advance(jobId, 75, 'mathpix');
 
         try {
           // Cherry-pick: only send pages that likely contain tables or formulas
@@ -294,6 +346,9 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
             const CONCURRENCY = 5;
 
             for (let i = 0; i < sortedPages.length; i += CONCURRENCY) {
+              // Mathpix bills per page and this loop's own progress tick only
+              // fires after the batch resolves, so check before spending.
+              await assertJobActive(jobId);
               const batch = sortedPages.slice(i, i + CONCURRENCY);
               const results = await Promise.all(
                 batch.map(async (pageNum) => {
@@ -317,7 +372,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
 
               // Progress: 75-80% range
               const progress = Math.round(75 + ((i + batch.length) / sortedPages.length) * 5);
-              await processingLogRepository.updateJobProgress(jobId, progress, 'mathpix');
+              await advance(jobId, progress, 'mathpix');
             }
 
             await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned content for ${pageMarkdown.size} pages`);
@@ -344,6 +399,9 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
             await processingLogRepository.append(jobId, 'mathpix', `Mapped rich content to ${mathpixCount} sections`);
           }
         } catch (err: any) {
+          // This try wraps a progress tick, so it would otherwise swallow the
+          // cancellation bail-out as a Mathpix warning and let the run continue.
+          if (err instanceof JobCancelledError) throw err;
           await processingLogRepository.append(
             jobId, 'mathpix',
             `Mathpix failed: ${err.message}`,
@@ -351,7 +409,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
           );
         }
 
-        await processingLogRepository.updateJobProgress(jobId, 80, 'mathpix');
+        await advance(jobId, 80, 'mathpix');
       } else {
         await processingLogRepository.append(jobId, 'mathpix', 'Mathpix not configured — skipping rich content extraction');
       }
@@ -360,9 +418,9 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
       // ── Stage 6: OCR fallback (skip in toc-only mode) ──────────────
       if (mode === 'toc-only') {
         await processingLogRepository.append(jobId, 'ocr', 'TOC-only mode — skipping OCR');
-        await processingLogRepository.updateJobProgress(jobId, 90, 'ocr');
+        await advance(jobId, 90, 'ocr');
       } else {
-      await processingLogRepository.updateJobProgress(jobId, 80, 'ocr');
+      await advance(jobId, 80, 'ocr');
       await processingLogRepository.append(jobId, 'ocr', 'Checking for sections needing OCR...');
 
       const updatedSections = await sectionRepository.findByBookId(bookId);
@@ -381,6 +439,10 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
 
           let ocrText = '';
           for (let page = startPage; page <= endPage; page++) {
+            // One Anthropic call per page and the stage's progress tick only
+            // fires once the whole section is done — a long section would keep
+            // billing well past the cancel without this checkpoint.
+            await assertJobActive(jobId);
             try {
               const imageBuffer = await pdfService.renderPageToImage(pdfBuffer, page, 2.0);
               const base64Image = imageBuffer.toString('base64');
@@ -427,7 +489,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
           }
 
           const progress = Math.round(80 + ((i + 1) / emptySections.length) * 10);
-          await processingLogRepository.updateJobProgress(jobId, progress, 'ocr');
+          await advance(jobId, progress, 'ocr');
         }
 
         await processingLogRepository.append(jobId, 'ocr', `OCR completed for ${emptySections.length} sections`);
@@ -435,11 +497,11 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
         await processingLogRepository.append(jobId, 'ocr', 'No sections need OCR — all have text');
       }
 
-      await processingLogRepository.updateJobProgress(jobId, 90, 'ocr');
+      await advance(jobId, 90, 'ocr');
       } // end mode !== 'toc-only' for OCR
 
       // ── Stage 7: Generate cover (90-95%) ──────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 90, 'cover');
+      await advance(jobId, 90, 'cover');
       await processingLogRepository.append(jobId, 'cover', 'Checking cover image...');
 
       const catalog = await bookRepository.findCatalogByHash(fileHash);
@@ -461,21 +523,41 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
         await processingLogRepository.append(jobId, 'cover', 'Cover already exists — skipping');
       }
 
-      await processingLogRepository.updateJobProgress(jobId, 95, 'cover');
+      await advance(jobId, 95, 'cover');
 
       // ── Stage 8: Finalize (95-100%) ───────────────────────────────
-      await processingLogRepository.updateJobProgress(jobId, 95, 'finalize');
+      await advance(jobId, 95, 'finalize');
       await processingLogRepository.append(jobId, 'finalize', 'Finalizing processing...');
 
+      // completeJob is the atomic gate here: it only lands while the job is
+      // still active, so a cancel arriving after the checkpoint above still
+      // wins and the book is never marked complete for a job that didn't
+      // complete. Hence it runs BEFORE the book's status write.
+      if (!(await processingLogRepository.completeJob(jobId))) {
+        throw new JobCancelledError(jobId);
+      }
       await bookRepository.update(bookId, { processingStatus: 'complete', structureSource: 'ai' });
-      await processingLogRepository.completeJob(jobId);
       await processingLogRepository.append(jobId, 'finalize', 'Processing complete!');
 
       await doc.destroy().catch(() => {});
     } catch (error: any) {
+      await openDoc?.destroy().catch(() => {});
+      if (error instanceof JobCancelledError) {
+        // cancelJob already wrote 'Cancelled by user' on the job and set the book
+        // to 'error'. Running the failure tail here would overwrite that outcome
+        // and refund a cancel, which the cancelJob policy explicitly rejects.
+        await logCancelledExit(jobId, 'PDF pipeline');
+        return;
+      }
       const errorMessage = error.message ?? 'Unknown error';
       await processingLogRepository.append(jobId, 'error', `Pipeline failed: ${errorMessage}`, 'error');
-      await processingLogRepository.failJob(jobId, errorMessage);
+      if (!(await processingLogRepository.failJob(jobId, errorMessage))) {
+        // A cancel or a retry claim beat us to this job's terminal status, so it
+        // owns the book state and the refund decision. Stop here rather than
+        // double-refunding (refundFailedJob is not idempotent).
+        await logCancelledExit(jobId, 'PDF pipeline');
+        return;
+      }
       await markBookErrored(bookId, jobId);
       // The customer paid for processing that never finished — give the money
       // back here, at the point of failure. The catch above deliberately does
@@ -495,18 +577,18 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
 async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: string): Promise<void> {
   try {
     // ── Stage 1: Download (0-10%) ────────────────────────────────
-    await processingLogRepository.updateJobProgress(jobId, 0, 'download');
+    await advance(jobId, 0, 'download');
     await processingLogRepository.append(jobId, 'download', 'Downloading EPUB from storage...');
 
     const [file] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, fileHash)).limit(1);
     if (!file) throw new Error('EPUB file not found in storage');
 
     const epubBuffer = await storageService.downloadPdf(file.r2Key);
-    await processingLogRepository.updateJobProgress(jobId, 10, 'download');
+    await advance(jobId, 10, 'download');
     await processingLogRepository.append(jobId, 'download', `EPUB downloaded (${(epubBuffer.length / 1024).toFixed(0)} KB)`);
 
     // ── Stage 2: Parse (10-40%) ──────────────────────────────────
-    await processingLogRepository.updateJobProgress(jobId, 10, 'parse');
+    await advance(jobId, 10, 'parse');
     await processingLogRepository.append(jobId, 'parse', 'Parsing EPUB structure...');
 
     const book = parseEpub(epubBuffer);
@@ -514,16 +596,20 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
       throw new Error('EPUB contains no readable chapters');
     }
     await processingLogRepository.append(jobId, 'parse', `Parsed ${book.chapters.length} chapter(s), title="${book.title}", author="${book.author ?? 'unknown'}"`);
-    await processingLogRepository.updateJobProgress(jobId, 40, 'parse');
+    await advance(jobId, 40, 'parse');
 
     // ── Stage 3: Structure + text (40-85%) ───────────────────────
-    await processingLogRepository.updateJobProgress(jobId, 40, 'structure');
+    await advance(jobId, 40, 'structure');
     await processingLogRepository.append(jobId, 'structure', 'Writing chapters and sections to the database...');
 
     // EPUBs don't have real pages. Use chapterIndex as the page number so the
     // existing page-based progress + navigation logic still works.
     let sectionOrder = 0;
     for (const ch of book.chapters) {
+      // Check before inserting, not after: this loop's progress tick runs at the
+      // end of the iteration, so without this a cancel would still re-create a
+      // chapter/section over the tombstones cancelJob just wrote.
+      await assertJobActive(jobId);
       const chapter = await chapterRepository.create({
         bookId,
         title: ch.title,
@@ -542,12 +628,12 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
         extractedText: ch.plainText,
       });
       const pct = 40 + Math.round((sectionOrder / book.chapters.length) * 45);
-      await processingLogRepository.updateJobProgress(jobId, pct, 'structure');
+      await advance(jobId, pct, 'structure');
     }
     await processingLogRepository.append(jobId, 'structure', `Wrote ${book.chapters.length} section(s) with extracted text`);
 
     // ── Stage 4: Cover (85-95%) ──────────────────────────────────
-    await processingLogRepository.updateJobProgress(jobId, 85, 'cover');
+    await advance(jobId, 85, 'cover');
     const catalog = await bookRepository.findCatalogByHash(fileHash);
     if (catalog) {
       // EPUB uploads send totalPages: 0 and rely on this backfill. The chapter
@@ -576,17 +662,28 @@ async function orchestrateEpubPipeline(jobId: string, fileHash: string, bookId: 
     } else {
       await processingLogRepository.append(jobId, 'cover', 'No catalog entry for this file — skipping cover and page count', 'warn');
     }
-    await processingLogRepository.updateJobProgress(jobId, 95, 'cover');
+    await advance(jobId, 95, 'cover');
 
     // ── Stage 5: Finalize (95-100%) ──────────────────────────────
-    await processingLogRepository.updateJobProgress(jobId, 95, 'finalize');
+    await advance(jobId, 95, 'finalize');
+    // Same atomic gate as the PDF pipeline — completeJob before the book write.
+    if (!(await processingLogRepository.completeJob(jobId))) {
+      throw new JobCancelledError(jobId);
+    }
     await bookRepository.update(bookId, { processingStatus: 'complete', structureSource: 'epub' });
-    await processingLogRepository.completeJob(jobId);
     await processingLogRepository.append(jobId, 'finalize', 'EPUB processing complete');
   } catch (error: any) {
+    if (error instanceof JobCancelledError) {
+      // Quiet exit — cancelJob owns this job's outcome (see the PDF pipeline).
+      await logCancelledExit(jobId, 'EPUB pipeline');
+      return;
+    }
     const errorMessage = error.message ?? 'Unknown error';
     await processingLogRepository.append(jobId, 'error', `EPUB pipeline failed: ${errorMessage}`, 'error');
-    await processingLogRepository.failJob(jobId, errorMessage);
+    if (!(await processingLogRepository.failJob(jobId, errorMessage))) {
+      await logCancelledExit(jobId, 'EPUB pipeline');
+      return;
+    }
     await markBookErrored(bookId, jobId);
     // Same contract as the PDF pipeline above — refund at the point of failure
     // because this catch does not rethrow either (KAN-303).

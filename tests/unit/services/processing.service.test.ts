@@ -17,6 +17,7 @@ const {
   dbSelectMock,
   updateJobProgressMock,
   completeJobMock,
+  isJobActiveMock,
   findCatalogByHashMock,
   downloadPdfMock,
   parseEpubMock,
@@ -35,6 +36,7 @@ const {
   dbSelectMock: vi.fn(),
   updateJobProgressMock: vi.fn(),
   completeJobMock: vi.fn(),
+  isJobActiveMock: vi.fn(),
   findCatalogByHashMock: vi.fn(),
   downloadPdfMock: vi.fn(),
   parseEpubMock: vi.fn(),
@@ -73,6 +75,7 @@ vi.mock('../../../src/repositories/processing-log.repository.js', () => ({
     failJob: failJobMock,
     updateJobProgress: updateJobProgressMock,
     completeJob: completeJobMock,
+    isJobActive: isJobActiveMock,
   },
 }));
 vi.mock('../../../src/repositories/chapter.repository.js', () => ({
@@ -189,10 +192,20 @@ describe('orchestratePipeline - refund on pipeline failure (KAN-303)', () => {
   beforeEach(() => {
     for (const m of [
       updateMock, dbSelectMock, appendMock, failJobMock, updateJobProgressMock,
-      completeJobMock, findCatalogByHashMock, downloadPdfMock, parseEpubMock,
-      chapterCreateMock, sectionCreateMock, refundFailedJobMock, getJobMock,
-      transactionMock,
+      completeJobMock, isJobActiveMock, findCatalogByHashMock, downloadPdfMock,
+      parseEpubMock, chapterCreateMock, sectionCreateMock, refundFailedJobMock,
+      getJobMock, transactionMock,
     ]) m.mockReset();
+
+    // The three job-status writers are claim-based since KAN-332: they resolve
+    // to the updated row while the job is active and to null once it has gone
+    // terminal, and the pipeline reads that null as "cancelled". So the default
+    // fixture must be "job is alive" — a bare undefined would make every
+    // pipeline in this file bail out at stage 1.
+    updateJobProgressMock.mockResolvedValue({ id: 'job-1', status: 'processing' });
+    completeJobMock.mockResolvedValue({ id: 'job-1', status: 'completed' });
+    failJobMock.mockResolvedValue({ id: 'job-1', status: 'failed' });
+    isJobActiveMock.mockResolvedValue(true);
 
     findCatalogByHashMock.mockResolvedValue({ format: 'epub' });
     dbSelectMock.mockImplementation(selectReturning([{ r2Key: 'r2/key', fileHash: 'hash-1' }]));
@@ -305,6 +318,173 @@ describe('orchestratePipeline - refund on pipeline failure (KAN-303)', () => {
     await processingService.cancelJob('job-1');
 
     expect(failJobMock).toHaveBeenCalledWith('job-1', 'Cancelled by user');
+    expect(refundFailedJobMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- Cancellation actually stops the pipeline (KAN-332) ---------------------
+// Before this, cancelJob only wrote 'failed' + tombstones: the running pipeline
+// had no cancellation awareness at all, and updateJobProgress unconditionally
+// re-set status='processing', so the next progress tick resurrected the job, the
+// run re-inserted the structure it had just tombstoned, and it finished
+// 'completed' with the book 'complete'. Driven through the EPUB branch (the PDF
+// branch needs pdfjs to get off the ground); both share the same helpers.
+describe('orchestratePipeline - honours a cancelled job (KAN-332)', () => {
+  const selectReturning = (rows: any[]) => () => ({
+    from: () => ({ where: () => ({ limit: async () => rows }) }),
+  });
+
+  const chapter = (i: number) => ({ title: `Ch ${i}`, chapterIndex: i, plainText: `text ${i}` });
+
+  // A cancel has landed: the guarded updateJobProgress stops matching the row.
+  const cancelledAtStructureTick = () =>
+    updateJobProgressMock.mockImplementation(async (_jobId: string, _pct: number, stage: string) =>
+      stage === 'structure' ? null : { id: 'job-1', status: 'processing' },
+    );
+
+  beforeEach(() => {
+    for (const m of [
+      updateMock, dbSelectMock, appendMock, failJobMock, updateJobProgressMock,
+      completeJobMock, isJobActiveMock, findCatalogByHashMock, downloadPdfMock,
+      parseEpubMock, chapterCreateMock, sectionCreateMock, refundFailedJobMock,
+      getJobMock, transactionMock,
+    ]) m.mockReset();
+
+    updateJobProgressMock.mockResolvedValue({ id: 'job-1', status: 'processing' });
+    completeJobMock.mockResolvedValue({ id: 'job-1', status: 'completed' });
+    failJobMock.mockResolvedValue({ id: 'job-1', status: 'failed' });
+    isJobActiveMock.mockResolvedValue(true);
+
+    // Dispatcher sees the epub format; the cover stage then sees null and skips
+    // it. That skip matters: bookRepository.updateCatalog is not part of this
+    // file's mock, so a truthy catalog at the cover stage throws and the run
+    // never reaches finalize - which would make the finalize assertions here
+    // pass for the wrong reason.
+    findCatalogByHashMock
+      .mockResolvedValueOnce({ format: 'epub' })
+      .mockResolvedValue(null);
+    dbSelectMock.mockImplementation(selectReturning([{ r2Key: 'r2/key', fileHash: 'hash-1' }]));
+    downloadPdfMock.mockResolvedValue(Buffer.from('epub-bytes'));
+    parseEpubMock.mockReturnValue({
+      title: 'Test Book',
+      author: 'Test Author',
+      chapters: [chapter(1), chapter(2), chapter(3)],
+    });
+    chapterCreateMock.mockResolvedValue({ id: 'chapter-1' });
+    sectionCreateMock.mockResolvedValue({ id: 'section-1' });
+    updateMock.mockResolvedValue(undefined);
+    appendMock.mockResolvedValue(undefined);
+    refundFailedJobMock.mockResolvedValue('no-charge');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('bails at the next stage boundary when a progress tick finds the job gone', async () => {
+    cancelledAtStructureTick();
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    // The whole point: the run stops instead of finishing.
+    expect(completeJobMock).not.toHaveBeenCalled();
+    expect(updateMock).not.toHaveBeenCalledWith('book-1', expect.objectContaining({
+      processingStatus: 'complete',
+    }));
+  });
+
+  it('never re-inserts the chapters/sections the cancel tombstoned', async () => {
+    cancelledAtStructureTick();
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(chapterCreateMock).not.toHaveBeenCalled();
+    expect(sectionCreateMock).not.toHaveBeenCalled();
+  });
+
+  it('stops mid-loop, so a cancel during the structure stage stops creating rows', async () => {
+    // Alive for the first two chapters, cancelled before the third.
+    isJobActiveMock
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(chapterCreateMock).toHaveBeenCalledTimes(2);
+    expect(sectionCreateMock).toHaveBeenCalledTimes(2);
+    expect(completeJobMock).not.toHaveBeenCalled();
+  });
+
+  it('cannot mark the book complete when the cancel lands during finalize', async () => {
+    // Every tick still matched; the cancel only beat us to the finalize write.
+    completeJobMock.mockResolvedValue(null);
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(updateMock).not.toHaveBeenCalledWith('book-1', {
+      processingStatus: 'complete',
+      structureSource: 'epub',
+    });
+  });
+
+  it('takes the quiet exit: no failJob, no book error, no refund on a cancelled run', async () => {
+    cancelledAtStructureTick();
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    // cancelJob already wrote 'Cancelled by user' and set the book to 'error' —
+    // re-running the failure tail would overwrite that and refund a cancel,
+    // which the cancelJob policy explicitly rejects.
+    expect(failJobMock).not.toHaveBeenCalled();
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(refundFailedJobMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a log line explaining why the pipeline stopped', async () => {
+    cancelledAtStructureTick();
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(appendMock).toHaveBeenCalledWith(
+      'job-1', 'cancel', 'EPUB pipeline stopped: job is no longer active (cancelled)',
+    );
+  });
+
+  it('still resolves (never rethrows) on a cancelled run', async () => {
+    updateJobProgressMock.mockResolvedValue(null);
+
+    await expect(
+      processingService.orchestratePipeline('job-1', 'hash-1', 'book-1'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('does not double-refund when a genuine error races something terminal', async () => {
+    // A real stage failure, but failJob reports the job was already terminal
+    // (cancelled, or claimed by a retry) — that owner owns the refund decision.
+    // refundFailedJob is not idempotent, so running it here charges twice.
+    downloadPdfMock.mockRejectedValue(new Error('R2 download failed'));
+    failJobMock.mockResolvedValue(null);
+
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    expect(failJobMock).toHaveBeenCalledWith('job-1', 'R2 download failed');
+    expect(refundFailedJobMock).not.toHaveBeenCalled();
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves an uncancelled run completely unaffected', async () => {
+    await processingService.orchestratePipeline('job-1', 'hash-1', 'book-1');
+
+    // All three chapters written, job completed, book complete, nothing failed.
+    expect(chapterCreateMock).toHaveBeenCalledTimes(3);
+    expect(completeJobMock).toHaveBeenCalledWith('job-1');
+    expect(updateMock).toHaveBeenCalledWith('book-1', {
+      processingStatus: 'complete',
+      structureSource: 'epub',
+    });
+    expect(failJobMock).not.toHaveBeenCalled();
     expect(refundFailedJobMock).not.toHaveBeenCalled();
   });
 });
