@@ -10,6 +10,7 @@ import { chapterRepository } from '../repositories/chapter.repository.js';
 import { sectionRepository } from '../repositories/section.repository.js';
 import { NibParser } from '../lib/nib/parser.js';
 import { NibDocument } from '../lib/nib/models.js';
+import { inFlightJobIds } from '../jobs/in-flight.js';
 import { db } from '../db/index.js';
 import { pdfFiles, bookCatalog, books } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -128,12 +129,17 @@ export const processingService = {
    * (unzip + parse OPF/XHTML + extract plain text + insert sections).
    */
   async orchestratePipeline(jobId: string, fileHash: string, bookId: string, mode: string = 'full'): Promise<void> {
-    // Look up the catalog to decide which pipeline to run.
-    const catalog = await bookRepository.findCatalogByHash(fileHash);
-    if (catalog?.format === 'epub') {
-      return orchestrateEpubPipeline(jobId, fileHash, bookId);
+    inFlightJobIds.add(jobId);
+    try {
+      // Look up the catalog to decide which pipeline to run.
+      const catalog = await bookRepository.findCatalogByHash(fileHash);
+      if (catalog?.format === 'epub') {
+        return await orchestrateEpubPipeline(jobId, fileHash, bookId);
+      }
+      return await orchestratePdfPipeline(jobId, fileHash, bookId, mode);
+    } finally {
+      inFlightJobIds.delete(jobId);
     }
-    return orchestratePdfPipeline(jobId, fileHash, bookId, mode);
   },
 
   /**
