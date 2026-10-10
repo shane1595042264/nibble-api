@@ -167,6 +167,12 @@ export function resolveConflict(
   return coerceDates(merged);
 }
 
+// The returned syncedAt is backed off by this much: a concurrent write stamps
+// updatedAt (JS clock, or Postgres now() for inserts) before its commit is
+// visible to our reads, so a row stamped just before the watermark can still
+// be missing from them. Re-pulling the last second once is harmless.
+const WATERMARK_SAFETY_MS = 1000;
+
 // ─── Sync service ───────────────────────────────────────────────────
 
 export const syncService = {
@@ -560,6 +566,10 @@ export const syncService = {
 
     // ── 2. Gather server changes for the client ──────────────────
 
+    // The client's next pull starts here, so take it BEFORE the reads below (not
+    // in a transaction): a write landing while they run must stay after it.
+    const syncedAt = new Date(Date.now() - WATERMARK_SAFETY_MS);
+
     // Books modified since lastSyncedAt (includes soft-deleted), plus echoed tombstones
     const serverBooksRaw = withTombstones(await bookRepository.findModifiedSince(userId, since), tombstones.books);
 
@@ -631,7 +641,7 @@ export const syncService = {
         exercises: serverExercises,
       },
       failedEntities,
-      syncedAt: new Date().toISOString(),
+      syncedAt: syncedAt.toISOString(),
     };
   },
 };
