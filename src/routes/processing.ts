@@ -102,6 +102,12 @@ processingRoutes.post('/:jobId/cancel', async (c) => {
   if (job.status === 'completed') {
     return c.json({ error: 'Job already completed' }, 400);
   }
+  // cancelJob soft-deletes the BOOK's structure, not the job's. A stale client
+  // holding a superseded (retried) or already-failed id would otherwise wipe the
+  // chapters of the newer job that is still running (KAN-347).
+  if (job.status !== 'pending' && job.status !== 'processing') {
+    return c.json({ error: 'Job is not running' }, 409);
+  }
 
   const { processingService } = await import('../services/processing.service.js');
   await processingService.cancelJob(jobId);
