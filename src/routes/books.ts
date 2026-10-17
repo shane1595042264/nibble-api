@@ -342,6 +342,19 @@ bookRoutes.put('/:id/structure', async (c) => {
       ? []
       : await tx.insert(chapters).values(chapterRows).returning();
 
+    // A new section with exactly an old section's page range keeps that row's extracted
+    // text, Mathpix rich content and reading position — the re-insert would otherwise drop
+    // them for every section in the book (KAN-352). Each old row is claimed at most once.
+    // Split/merged ranges stay text-less: extracted_text is per section, not per page.
+    const oldByRange = new Map<string, typeof oldSections>();
+    for (const oldSec of oldSections) {
+      if (oldSec.startPage == null || oldSec.endPage == null) continue;
+      const key = `${oldSec.startPage}-${oldSec.endPage}`;
+      const bucket = oldByRange.get(key);
+      if (bucket) bucket.push(oldSec);
+      else oldByRange.set(key, [oldSec]);
+    }
+
     // Build all section rows with progress preservation, then bulk insert in one round-trip.
     const sectionRows: Array<typeof sections.$inferInsert> = [];
     let sectionOrder = 0;
@@ -367,6 +380,8 @@ bookRoutes.put('/:id/structure', async (c) => {
           }
         }
 
+        const match = oldByRange.get(`${sec.startPage}-${sec.endPage}`)?.shift();
+
         sectionRows.push({
           bookId: book.id,
           chapterId: insertedChapter.id,
@@ -376,7 +391,11 @@ bookRoutes.put('/:id/structure', async (c) => {
           sectionType: 'content',
           sortOrder: ++sectionOrder,
           isRead,
-          readAt: isRead ? new Date() : null,
+          readAt: isRead ? (match?.readAt ?? new Date()) : null,
+          extractedText: match?.extractedText ?? null,
+          richContent: match?.richContent ?? null,
+          scrollProgress: match?.scrollProgress ?? 0,
+          lastPageViewed: match?.lastPageViewed ?? null,
         });
       }
     }
