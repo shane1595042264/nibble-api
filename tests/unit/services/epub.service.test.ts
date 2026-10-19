@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import AdmZip from 'adm-zip';
-import { parseEpub } from '../../../src/services/epub.service.js';
+import { parseEpub, extractTextFromXhtml } from '../../../src/services/epub.service.js';
 
 // ─── KAN-309 ─────────────────────────────────────────────────────────────────
 // The TOC is the highest-priority source of chapter titles, but two defects
@@ -226,5 +226,45 @@ describe('parseEpub — title fallback chain is unchanged (KAN-309 negative cont
     const zip = new AdmZip(buildEpub3(chapters));
     zip.updateFile('OEBPS/Text/chap01.xhtml', Buffer.from(BODY(null, 'tiny')));
     expect(parseEpub(zip.toBuffer()).chapters).toHaveLength(0);
+  });
+});
+
+// ─── KAN-356 ─────────────────────────────────────────────────────────────────
+// Every leftover tag used to become a space, so inline markup split words
+// (Butter<span>nut</span>) and detached punctuation (<i>indica</i>,).
+
+const text = (inner: string) =>
+  extractTextFromXhtml(`<html><body>${inner}</body></html>`).plainText;
+
+describe('extractTextFromXhtml — inline tags (KAN-356)', () => {
+  it('keeps a word whole across an inline tag', () => {
+    expect(text('<p>Butter<span>nut</span> Squash</p>')).toBe('Butternut Squash');
+  });
+
+  it('keeps punctuation attached to an inline-wrapped word', () => {
+    expect(text('<p><i>indica</i>, <i>japonica</i>.</p>')).toBe('indica, japonica.');
+    expect(text('<p>rice (<i>paella</i>)</p>')).toBe('rice (paella)');
+  });
+
+  it('keeps the source whitespace between inline elements', () => {
+    expect(text('<p><em>one</em> <em>two</em></p>')).toBe('one two');
+  });
+
+  it('keeps paragraph breaks, including back-to-back paragraphs', () => {
+    expect(text('<p>a</p><p>b</p>')).toBe('a\n\nb');
+    expect(text('<div>a<div>b</div></div>')).toBe('a\nb');
+  });
+
+  it('breaks the line on a <br> that carries attributes', () => {
+    expect(text('<p>535 Albany Street<br class="calibre8"/>Boston</p>')).toBe('535 Albany Street\nBoston');
+  });
+
+  it('still separates table cells and void elements', () => {
+    expect(text('<table><tr><td>1 cup</td><td>rice</td></tr></table>')).toBe('1 cup rice');
+    expect(text('<p>one<img src="x.png"/>two<hr/>three</p>')).toBe('one two three');
+  });
+
+  it('decodes an escaped entity once', () => {
+    expect(text('<p>&amp;lt; &amp;amp; &amp;#39; &lt;b&gt; &amp;</p>')).toBe('&lt; &amp; &#39; <b> &');
   });
 });

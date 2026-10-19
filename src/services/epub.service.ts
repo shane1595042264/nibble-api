@@ -353,7 +353,7 @@ function parseTocTitles(tocXml: string, tocDir: string): Map<string, string> {
  * Strip XHTML content to readable plain text.
  * - Removes <script>/<style> blocks entirely
  * - Preserves paragraph breaks (</p>, </div>, </h1-6>, <br/> → \n)
- * - Strips all other tags
+ * - Strips inline tags without adding whitespace (cells/img/hr → space)
  * - Decodes common HTML entities
  */
 export function extractTextFromXhtml(xhtml: string): { title: string | null; plainText: string } {
@@ -382,23 +382,28 @@ export function extractTextFromXhtml(xhtml: string): { title: string | null; pla
   if (!docTitle) docTitle = fallbackTitle;
 
   // Block-level elements → newline
-  body = body.replace(/<br\s*\/?\s*>/gi, '\n');
+  body = body.replace(/<br\b[^>]*>/gi, '\n');
   body = body.replace(/<\/(p|div|li|h[1-6]|blockquote|section|article)\s*>/gi, '\n\n');
   body = body.replace(/<\/(tr|table)\s*>/gi, '\n');
-  // Strip remaining tags
-  body = body.replace(/<[^>]+>/g, ' ');
+  body = body.replace(/<(p|div|li|h[1-6]|blockquote|section|article|tr|table)\b[^>]*>/gi, '\n');
+  // Table cells and void elements still separate words
+  body = body.replace(/<\/?(td|th|img|hr)\b[^>]*>/gi, ' ');
+  // Strip remaining (inline) tags without adding whitespace — a space here
+  // splits Butter<span>nut</span> and detaches <i>indica</i>, from its comma
+  body = body.replace(/<[^>]+>/g, '');
 
-  // Decode entities — common set, plus numeric
+  // Decode entities — common set, plus numeric. &amp; goes last so an
+  // escaped entity (&amp;lt;) decodes once, to the literal text "&lt;".
   body = body
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
     .replace(/&apos;/gi, "'")
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/gi, '&');
 
   // Collapse whitespace: spaces within a line, blank lines between paragraphs
   body = body
