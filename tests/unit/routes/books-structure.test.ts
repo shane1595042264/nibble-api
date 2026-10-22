@@ -145,4 +145,65 @@ describe('PUT /books/:id/structure', () => {
     const rows = insertedSections();
     expect(rows.map((r) => r.extractedText)).toEqual(['text a', null]);
   });
+
+  // Reorganize Chapters sends chapters with no sections, so every multi-section chapter
+  // is merged into one. Read coverage is summed across the old rows (KAN-362).
+  describe('read state of merged sections', () => {
+    const LATER = new Date('2026-03-04T05:06:07Z');
+    const mergeInto = (startPage: number, endPage: number) =>
+      putStructure([{ title: 'Merged', startPage, endPage }]);
+
+    it('keeps two equal read halves read, with the latest readAt', async () => {
+      sectionRepo.findByBookId.mockResolvedValue([
+        oldSection('a', 1, 5, { isRead: true, readAt: READ_AT }),
+        oldSection('b', 6, 10, { isRead: true, readAt: LATER }),
+      ]);
+      await mergeInto(1, 10);
+      expect(insertedSections()[0]).toMatchObject({ isRead: true, readAt: LATER, extractedText: null });
+    });
+
+    it('keeps a chapter read when 2 of 3 equal sections are read', async () => {
+      sectionRepo.findByBookId.mockResolvedValue([
+        oldSection('a', 1, 3, { isRead: true, readAt: READ_AT }),
+        oldSection('b', 4, 6, { isRead: true, readAt: READ_AT }),
+        oldSection('c', 7, 9),
+      ]);
+      await mergeInto(1, 9);
+      expect(insertedSections()[0]).toMatchObject({ isRead: true, readAt: READ_AT });
+    });
+
+    it('leaves a chapter unread when only 1 of 3 sections is read', async () => {
+      sectionRepo.findByBookId.mockResolvedValue([
+        oldSection('a', 1, 3, { isRead: true, readAt: READ_AT }),
+        oldSection('b', 4, 6),
+        oldSection('c', 7, 9),
+      ]);
+      await mergeInto(1, 9);
+      expect(insertedSections()[0]).toMatchObject({ isRead: false, readAt: null });
+    });
+
+    it('does not count pages twice when old read rows overlap', async () => {
+      sectionRepo.findByBookId.mockResolvedValue([
+        oldSection('a', 1, 4, { isRead: true, readAt: READ_AT }),
+        oldSection('b', 2, 4, { isRead: true, readAt: READ_AT }),
+        oldSection('c', 3, 5, { isRead: true, readAt: READ_AT }),
+        oldSection('d', 6, 10),
+      ]);
+      // Pages 1-5 read out of 1-10 is exactly half, so not read; summing would give 10/10.
+      await mergeInto(1, 10);
+      expect(insertedSections()[0]).toMatchObject({ isRead: false });
+    });
+
+    it('only counts the part of a read row inside the new range', async () => {
+      sectionRepo.findByBookId.mockResolvedValue([
+        oldSection('a', 1, 20, { isRead: true, readAt: READ_AT }),
+        oldSection('b', 21, 30),
+      ]);
+      await putStructure([
+        { title: 'Head', startPage: 1, endPage: 18 },
+        { title: 'Tail', startPage: 19, endPage: 30 },
+      ]);
+      expect(insertedSections().map((r) => r.isRead)).toEqual([true, false]);
+    });
+  });
 });

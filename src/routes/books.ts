@@ -366,19 +366,30 @@ bookRoutes.put('/:id/structure', async (c) => {
         : [{ title: ch.title, startPage: ch.startPage, endPage: ch.endPage }];
 
       for (const sec of chapterSections) {
-        // Progress preservation: check if new section overlaps >50% with an old read section
-        let isRead = false;
+        // Progress preservation: the new section is read when old read sections together
+        // cover >50% of its pages. Summed across rows, not per row, so merging several read
+        // sections into one keeps it read (KAN-362). Clamped ranges are merged first because
+        // old rows can overlap each other and must not count a page twice.
         const newRange = sec.endPage - sec.startPage + 1;
+        const readSpans: Array<[number, number]> = [];
+        let latestReadAt: Date | null = null;
         for (const oldSec of oldSections) {
           if (!oldSec.isRead || oldSec.startPage == null || oldSec.endPage == null) continue;
           const overlapStart = Math.max(sec.startPage, oldSec.startPage);
           const overlapEnd = Math.min(sec.endPage, oldSec.endPage);
-          const overlap = Math.max(0, overlapEnd - overlapStart + 1);
-          if (overlap / newRange > 0.5) {
-            isRead = true;
-            break;
-          }
+          if (overlapEnd < overlapStart) continue;
+          readSpans.push([overlapStart, overlapEnd]);
+          if (oldSec.readAt && (!latestReadAt || oldSec.readAt > latestReadAt)) latestReadAt = oldSec.readAt;
         }
+        readSpans.sort((x, y) => x[0] - y[0]);
+        let readPages = 0;
+        let coveredThrough = sec.startPage - 1;
+        for (const [start, end] of readSpans) {
+          if (end <= coveredThrough) continue;
+          readPages += end - Math.max(start, coveredThrough + 1) + 1;
+          coveredThrough = end;
+        }
+        const isRead = readPages / newRange > 0.5;
 
         const match = oldByRange.get(`${sec.startPage}-${sec.endPage}`)?.shift();
 
@@ -391,7 +402,7 @@ bookRoutes.put('/:id/structure', async (c) => {
           sectionType: 'content',
           sortOrder: ++sectionOrder,
           isRead,
-          readAt: isRead ? (match?.readAt ?? new Date()) : null,
+          readAt: isRead ? (match?.readAt ?? latestReadAt ?? new Date()) : null,
           extractedText: match?.extractedText ?? null,
           richContent: match?.richContent ?? null,
           scrollProgress: match?.scrollProgress ?? 0,
