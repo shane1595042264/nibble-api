@@ -153,8 +153,8 @@ export const vocabBoundsSchema = z
   .passthrough();
 
 // Lenient settings: invalid enum/range values are silently dropped via .catch(undefined)
-// so a stale or buggy client can't permanently wedge sync. Unknown keys pass through
-// (passthrough) — the repository only writes columns known to Drizzle.
+// so a stale or buggy client can't permanently wedge sync. Unknown keys are stripped:
+// userId and id ARE Drizzle columns, and a body userId used to reach another user's row (KAN-363).
 const syncSettingsSchema = z.object({
   autoReadThresholdSeconds: z.coerce.number().int().min(1).max(3600).optional().catch(undefined),
   defaultViewMode: z.enum(VIEW_MODES).optional().catch(undefined),
@@ -162,7 +162,7 @@ const syncSettingsSchema = z.object({
   trackingMode: z.enum(TRACKING_MODES).optional().catch(undefined),
   targetLanguage: z.string().optional().catch(undefined),
   keymapOverrides: z.record(z.string(), z.unknown()).optional().catch(undefined),
-}).passthrough();
+});
 
 export const syncPayloadSchema = z.object({
   lastSyncedAt: z.string(),
