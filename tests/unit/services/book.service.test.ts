@@ -19,8 +19,11 @@ const bookRepo = vi.hoisted(() => ({
 vi.mock('../../../src/repositories/book.repository.js', () => ({ bookRepository: bookRepo }));
 
 // The remaining repos / db imports are unused by createBook but must resolve.
-vi.mock('../../../src/repositories/chapter.repository.js', () => ({ chapterRepository: {} }));
-vi.mock('../../../src/repositories/section.repository.js', () => ({ sectionRepository: {} }));
+// softDeleteByBookId: the existing-book upload restart clears the previous run's structure (KAN-365).
+const chapterRepo = vi.hoisted(() => ({ softDeleteByBookId: vi.fn() }));
+const sectionRepo = vi.hoisted(() => ({ softDeleteByBookId: vi.fn() }));
+vi.mock('../../../src/repositories/chapter.repository.js', () => ({ chapterRepository: chapterRepo }));
+vi.mock('../../../src/repositories/section.repository.js', () => ({ sectionRepository: sectionRepo }));
 vi.mock('../../../src/repositories/vocabulary.repository.js', () => ({ vocabularyRepository: {} }));
 
 // processing-log.repository: startPipelineAsync's catch calls failJob (KAN-279).
@@ -350,6 +353,82 @@ describe('bookService.handleUpload cross-user active-job collision (KAN-322)', (
     expect(result.isNew).toBe(true);
     await flush();
     expect(processingSvc.orchestratePipeline).toHaveBeenCalledWith('job-new', FILE_HASH, 'book-b', 'full');
+  });
+});
+
+
+// KAN-365: a failed run keeps the structure it built, and the re-run's builders
+// only INSERT. Re-uploading such a book must tombstone the old chapters/sections
+// inside the job transaction, the way /retry and stuck-job recovery already do.
+describe('bookService.handleUpload re-upload of a non-complete book (KAN-365)', () => {
+  const FILE_HASH = 'hash-reupload';
+  const CAT = { id: 'cat-reupload', userCount: 1 };
+  const TX = { marker: 'upload-tx' };
+  let order: string[];
+  let activeJobRow: { id: string; userId: string } | null;
+
+  beforeEach(() => {
+    order = [];
+    activeJobRow = null;
+    bookRepo.findCatalogByHash.mockReset().mockResolvedValue(CAT);
+    bookRepo.touchCatalog.mockReset().mockResolvedValue(undefined);
+    bookRepo.update.mockReset().mockResolvedValue(undefined);
+    bookRepo.findByUserIdAndCatalogId.mockReset().mockResolvedValue({ id: 'book-errored', processingStatus: 'error' });
+    processingLogRepo.findActiveJobByFileHash.mockReset().mockImplementation(async () => activeJobRow);
+    processingSvc.orchestratePipeline.mockReset().mockResolvedValue(undefined);
+    sectionRepo.softDeleteByBookId.mockReset().mockImplementation(async (_id: string, tx: unknown) => { order.push(tx === TX ? 'sections@tx' : 'sections@db'); });
+    chapterRepo.softDeleteByBookId.mockReset().mockImplementation(async (_id: string, tx: unknown) => { order.push(tx === TX ? 'chapters@tx' : 'chapters@db'); });
+    db.select.mockReset().mockReturnValue({
+      from: () => ({ where: () => ({ limit: () => Promise.resolve([{ id: 'file-reupload' }]) }) }),
+    });
+    (db as any).transaction = vi.fn(async (cb: (tx: any) => unknown) =>
+      cb(Object.assign(TX, {
+        insert: () => ({ values: () => ({ returning: () => { order.push('job-insert'); return Promise.resolve([{ id: 'job-rerun' }]); } }) }),
+      })),
+    );
+  });
+
+  const upload = () => bookService.handleUpload(USER_ID, FILE_HASH, Buffer.from('x'), 10, 'Errored Book');
+
+  it('soft-deletes the old sections and chapters inside the transaction, before the job insert', async () => {
+    const result = await upload();
+
+    expect(result.jobId).toBe('job-rerun');
+    expect(sectionRepo.softDeleteByBookId).toHaveBeenCalledWith('book-errored', TX);
+    expect(chapterRepo.softDeleteByBookId).toHaveBeenCalledWith('book-errored', TX);
+    expect(order).toEqual(['sections@tx', 'chapters@tx', 'job-insert']);
+    await flush();
+    expect(processingSvc.orchestratePipeline).toHaveBeenCalledWith('job-rerun', FILE_HASH, 'book-errored', 'full');
+  });
+
+  it('control: re-uploading a complete book deletes nothing', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue({ id: 'book-done', processingStatus: 'complete' });
+
+    const result = await upload();
+
+    expect(result.jobId).toBeUndefined();
+    expect(sectionRepo.softDeleteByBookId).not.toHaveBeenCalled();
+    expect(chapterRepo.softDeleteByBookId).not.toHaveBeenCalled();
+  });
+
+  it('control: adopting your own in-flight job deletes nothing', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue({ id: 'book-errored', processingStatus: 'processing' });
+    activeJobRow = { id: 'job-mine', userId: USER_ID };
+
+    const result = await upload();
+
+    expect(result.jobId).toBe('job-mine');
+    expect(sectionRepo.softDeleteByBookId).not.toHaveBeenCalled();
+    expect(chapterRepo.softDeleteByBookId).not.toHaveBeenCalled();
+  });
+
+  it('control: a foreign in-flight job 409s before anything is deleted', async () => {
+    activeJobRow = { id: 'job-theirs', userId: 'user-2' };
+
+    await expect(upload()).rejects.toMatchObject({ status: 409 });
+
+    expect(sectionRepo.softDeleteByBookId).not.toHaveBeenCalled();
+    expect(chapterRepo.softDeleteByBookId).not.toHaveBeenCalled();
   });
 });
 

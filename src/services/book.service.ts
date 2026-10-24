@@ -263,6 +263,13 @@ export const bookService = {
           return { jobId: activeJob.id, shouldStartPipeline: false };
         }
 
+        // A failed earlier run keeps whatever structure it built, and the new run
+        // only inserts, so without this every chapter and section would appear
+        // twice. Soft-delete, as /retry and stuck-job recovery do, so other
+        // devices get tombstones (KAN-229 / KAN-254, KAN-365).
+        await sectionRepository.softDeleteByBookId(existing.id, tx);
+        await chapterRepository.softDeleteByBookId(existing.id, tx);
+
         // Insert new job — partial unique index prevents duplicates
         const [job] = await tx.insert(processingJobs).values({
           fileHash,
