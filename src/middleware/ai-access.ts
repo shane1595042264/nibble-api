@@ -8,5 +8,5 @@ export async function aiAccessMiddleware(c: Context, next: Next) {
     await next();
     return;
   }
-  throw Errors.paymentRequired();
+  throw Errors.aiAccessRequired();
 }

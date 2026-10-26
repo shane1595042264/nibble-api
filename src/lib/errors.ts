@@ -22,6 +22,10 @@ export const Errors = {
     new AppError('DUPLICATE_BOOK', 'Book already in your library', 409),
   paymentRequired: () =>
     new AppError('PAYMENT_REQUIRED', 'Processing job not yet paid', 402),
+  // The AI gate's own 402 — paymentRequired's copy is about an unpaid processing
+  // job, which the reader showed verbatim to every user without AI access (KAN-367).
+  aiAccessRequired: () =>
+    new AppError('AI_ACCESS_REQUIRED', 'AI features are not enabled for this account.', 402),
   processingFailed: (msg: string) =>
     new AppError('PROCESSING_FAILED', msg, 500),
   aiError: (msg: string) =>
