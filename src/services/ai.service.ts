@@ -32,7 +32,7 @@ export interface Exercise {
 export const aiService = {
   // Structure extraction — sends EXTRACTED TEXT (not images) to Claude
   async classifyPages(extractedText: string[], tocIfAvailable?: string): Promise<PageAnalysis[]> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
 
     const results: PageAnalysis[] = [];
     const BATCH_SIZE = 30;
@@ -133,7 +133,7 @@ Respond with a JSON array of PageAnalysis objects.`;
 
   // Claude Vision for math bounding boxes (only flagged pages)
   async getMathBoundingBoxes(pageImages: Buffer[], pageNumbers: number[]): Promise<Array<{ page: number; regions: Array<{ x: number; y: number; w: number; h: number }> }>> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
 
     const results: Array<{ page: number; regions: Array<{ x: number; y: number; w: number; h: number }> }> = [];
     const BATCH_SIZE = 5;
@@ -187,7 +187,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     base64Image: string,
     options?: { signal?: AbortSignal },
   ): Promise<string> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
 
     const response = await anthropic.messages.create(
       {
@@ -240,7 +240,7 @@ Respond with a JSON array of PageAnalysis objects.`;
     targetLanguage: string,
     options?: { signal?: AbortSignal },
   ): Promise<{ pronunciation: string; translation: string; partOfSpeech: string }> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
     const prompt = `You are a precise dictionary/translator. Given an English word and the sentence it appears in, provide:
 1. The romanized pronunciation of the ENGLISH word (IPA format, e.g. /deɪ/ for "day")
 2. A single, contextually accurate ${targetLanguage} translation — just ONE word or very short phrase, not multiple definitions
@@ -290,7 +290,7 @@ Respond in this exact JSON format only, no other text:
     targetLanguage: string,
     options?: { signal?: AbortSignal },
   ): Promise<{ translation: string }> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
     const prompt = `Translate the following English sentence into ${targetLanguage}. Use the surrounding paragraph for context to ensure accuracy. Return ONLY the translated sentence, nothing else.
 
 Sentence: "${sentence}"
@@ -316,7 +316,7 @@ Paragraph context: "${paragraphContext}"`;
     targetLanguage: string,
     options?: { signal?: AbortSignal },
   ): Promise<{ explanation: string }> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
     const prompt = `Explain briefly (under 100 words) why the English word "${word}" is translated as "${translation}" in ${targetLanguage}, given the sentence: "${sentence}". Focus on how the sentence context determines this specific meaning. Be concise and direct.`;
 
     const response = await anthropic.messages.create(
@@ -335,7 +335,7 @@ Paragraph context: "${paragraphContext}"`;
     surroundingContext: string,
     options?: { signal?: AbortSignal },
   ): Promise<{ explanation: string }> {
-    if (!anthropic) throw new Error('Anthropic not configured');
+    if (!anthropic) throw Errors.aiUnavailable('Anthropic not configured');
     const prompt = `Explain the following content clearly and concisely. What does it mean, what is it showing, and how does it relate to the surrounding context?
 
 Content:

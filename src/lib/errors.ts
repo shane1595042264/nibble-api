@@ -26,6 +26,8 @@ export const Errors = {
     new AppError('PROCESSING_FAILED', msg, 500),
   aiError: (msg: string) =>
     new AppError('AI_ERROR', msg, 502),
+  aiUnavailable: (msg = 'The AI service is busy right now — please try again in a moment') =>
+    new AppError('AI_UNAVAILABLE', msg, 503),
   rateLimited: () =>
     new AppError('RATE_LIMITED', 'Too many requests', 429),
   badRequest: (msg: string) =>
