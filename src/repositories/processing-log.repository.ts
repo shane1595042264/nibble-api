@@ -113,6 +113,26 @@ export const processingLogRepository = {
   },
 
   /**
+   * Fail every still-active job for a book in one statement, returning the ids
+   * it stopped. Used when the book itself is deleted mid-processing: the
+   * pipeline never reads books.deleted_at, so ending the job is what lets its
+   * KAN-332 checkpoints stop the run (KAN-369). Same active-only guard as
+   * failJob, so a job that already reached a terminal status is left alone.
+   */
+  async failActiveJobsByBookId(bookId: string, error: string) {
+    return db
+      .update(processingJobs)
+      .set({ status: 'failed', error })
+      .where(
+        and(
+          eq(processingJobs.bookId, bookId),
+          inArray(processingJobs.status, ACTIVE_JOB_STATUSES),
+        ),
+      )
+      .returning({ id: processingJobs.id });
+  },
+
+  /**
    * Cheap read-only liveness check for a job, for cancellation checkpoints that
    * should not also write a progress row — notably inside the paid Mathpix and
    * Anthropic loops, where the goal is to stop spending as early as possible.

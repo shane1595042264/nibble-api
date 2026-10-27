@@ -121,6 +121,18 @@ export const bookService = {
 
   async deleteBook(id: string, userId: string) {
     const book = await this.getBook(id, userId);
+    // Stop any pipeline still running for this book before tearing it down.
+    // Without this the run kept paying for Mathpix/OCR, wrote new chapters under
+    // the deleted book and stamped it 'complete' (KAN-369). Failing the job is
+    // enough: the pipeline's checkpoints see it go terminal and take the quiet
+    // cancel exit. No refund, matching cancelJob's policy. Done before the
+    // cascade so most of what the run wrote before stopping is covered by it.
+    const stoppedJobs = await processingLogRepository.failActiveJobsByBookId(book.id, 'Book deleted during processing');
+    for (const job of stoppedJobs) {
+      await processingLogRepository
+        .append(job.id, 'cancel', 'Processing cancelled: book was deleted')
+        .catch((err) => console.error(`[book.service] failed to log delete-cancel for job ${job.id}`, err));
+    }
     // Cascade soft-delete: chapters, sections, vocabulary for this book.
     // The WHERE deletedAt IS NULL guard inside each helper keeps re-runs idempotent.
     // Soft-deleted vocab rows flow back to clients as tombstones via the existing

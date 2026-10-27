@@ -15,6 +15,7 @@ const bookRepo = vi.hoisted(() => ({
   restore: vi.fn(),
   update: vi.fn(),
   findById: vi.fn(),
+  softDelete: vi.fn(),
 }));
 vi.mock('../../../src/repositories/book.repository.js', () => ({ bookRepository: bookRepo }));
 
@@ -24,10 +25,17 @@ const chapterRepo = vi.hoisted(() => ({ softDeleteByBookId: vi.fn() }));
 const sectionRepo = vi.hoisted(() => ({ softDeleteByBookId: vi.fn() }));
 vi.mock('../../../src/repositories/chapter.repository.js', () => ({ chapterRepository: chapterRepo }));
 vi.mock('../../../src/repositories/section.repository.js', () => ({ sectionRepository: sectionRepo }));
-vi.mock('../../../src/repositories/vocabulary.repository.js', () => ({ vocabularyRepository: {} }));
+const vocabRepo = vi.hoisted(() => ({ softDeleteByBookId: vi.fn() }));
+vi.mock('../../../src/repositories/vocabulary.repository.js', () => ({ vocabularyRepository: vocabRepo }));
 
-// processing-log.repository: startPipelineAsync's catch calls failJob (KAN-279).
-const processingLogRepo = vi.hoisted(() => ({ failJob: vi.fn(), findActiveJobByFileHash: vi.fn() }));
+// processing-log.repository: startPipelineAsync's catch calls failJob (KAN-279);
+// deleteBook stops the book's active job (KAN-369).
+const processingLogRepo = vi.hoisted(() => ({
+  failJob: vi.fn(),
+  findActiveJobByFileHash: vi.fn(),
+  failActiveJobsByBookId: vi.fn(),
+  append: vi.fn(),
+}));
 vi.mock('../../../src/repositories/processing-log.repository.js', () => ({ processingLogRepository: processingLogRepo }));
 
 // processing.service is dynamically imported by startPipelineAsync. Stub
@@ -472,5 +480,70 @@ describe('bookService.updateBookMetadata never writes the shared catalog title (
       bookService.updateBookMetadata('book-1', USER_ID, { author: 'New Author' }),
     ).rejects.toMatchObject({ status: 404 });
     expect(bookRepo.updateCatalog).not.toHaveBeenCalled();
+  });
+});
+
+// Regression coverage for KAN-369: deleting a book that is still processing left
+// its job active, so the pipeline kept billing Mathpix/OCR, wrote new chapters
+// under the deleted book and stamped it 'complete'. deleteBook now ends the job,
+// and the pipeline's KAN-332 checkpoints stop the run on their next tick.
+describe("bookService.deleteBook stops the book's active processing job (KAN-369)", () => {
+  const BOOK = { id: 'book-1', userId: USER_ID, catalogId: CATALOG_ID };
+  let order: string[];
+
+  beforeEach(() => {
+    order = [];
+    bookRepo.findById.mockReset().mockResolvedValue(BOOK);
+    processingLogRepo.failActiveJobsByBookId.mockReset().mockImplementation(async () => {
+      order.push('failJobs');
+      return [{ id: 'job-1' }];
+    });
+    processingLogRepo.append.mockReset().mockResolvedValue({});
+    for (const [name, fn] of [
+      ['chapters', chapterRepo.softDeleteByBookId],
+      ['sections', sectionRepo.softDeleteByBookId],
+      ['vocab', vocabRepo.softDeleteByBookId],
+      ['book', bookRepo.softDelete],
+    ] as const) {
+      fn.mockReset().mockImplementation(async () => {
+        order.push(name);
+      });
+    }
+  });
+
+  it('fails the active job and logs why, before the cascade soft-delete', async () => {
+    await expect(bookService.deleteBook('book-1', USER_ID)).resolves.toEqual({ deleted: true });
+
+    expect(processingLogRepo.failActiveJobsByBookId).toHaveBeenCalledWith('book-1', 'Book deleted during processing');
+    expect(processingLogRepo.append).toHaveBeenCalledWith('job-1', 'cancel', 'Processing cancelled: book was deleted');
+    expect(order).toEqual(['failJobs', 'chapters', 'sections', 'vocab', 'book']);
+    // No refund and no processingStatus write on the row being deleted.
+    expect(bookRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('writes no log row when the book has no active job (none, or already terminal)', async () => {
+    processingLogRepo.failActiveJobsByBookId.mockResolvedValue([]);
+
+    await expect(bookService.deleteBook('book-1', USER_ID)).resolves.toEqual({ deleted: true });
+
+    expect(processingLogRepo.append).not.toHaveBeenCalled();
+    expect(bookRepo.softDelete).toHaveBeenCalledWith('book-1');
+  });
+
+  it('still deletes the book when the cancel log write fails', async () => {
+    processingLogRepo.append.mockRejectedValue(new Error('log insert failed'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(bookService.deleteBook('book-1', USER_ID)).resolves.toEqual({ deleted: true });
+
+    expect(bookRepo.softDelete).toHaveBeenCalledWith('book-1');
+    errSpy.mockRestore();
+  });
+
+  it('touches no job for a book that is not on the caller shelf', async () => {
+    bookRepo.findById.mockResolvedValue({ ...BOOK, userId: 'someone-else' });
+
+    await expect(bookService.deleteBook('book-1', USER_ID)).rejects.toMatchObject({ status: 404 });
+    expect(processingLogRepo.failActiveJobsByBookId).not.toHaveBeenCalled();
   });
 });
