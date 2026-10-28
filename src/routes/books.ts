@@ -202,6 +202,7 @@ bookRoutes.delete('/:id', async (c) => {
 });
 
 // PUT /:id/metadata — update shared catalog metadata (author, description, cover, etc.)
+// Only writes the catalog when the caller is its sole live holder (KAN-371).
 // `title` is still accepted by the schema for backward compatibility with deployed
 // clients, but the service drops it: per-user renames live in books.custom_title and
 // catalog titles are admin-only (PUT /admin/catalog/:id).
@@ -211,7 +212,7 @@ export const updateMetadataSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   author: z.string().max(500).optional(),
   description: z.string().max(2000).optional(),
-  coverUrl: z.string().url().optional().nullable(),
+  coverUrl: z.string().url().max(BOOK_COVER_URL_MAX).optional().nullable(),
   language: z.string().max(100).optional(),
   publisher: z.string().max(500).optional(),
   publishYear: z.number().int().optional().nullable(),

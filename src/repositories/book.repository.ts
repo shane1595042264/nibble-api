@@ -69,6 +69,25 @@ export const bookRepository = {
     return row?.total ?? 0;
   },
 
+  /**
+   * Whether any OTHER user has a live (not soft-deleted) book on this catalog row.
+   * book_catalog is shared by every holder, so user-scoped writes to it must check this.
+   */
+  async hasOtherLiveHolder(catalogId: string, userId: string) {
+    const [row] = await db
+      .select({ id: books.id })
+      .from(books)
+      .where(
+        and(
+          eq(books.catalogId, catalogId),
+          sql`${books.userId} <> ${userId}`,
+          isNull(books.deletedAt),
+        ),
+      )
+      .limit(1);
+    return !!row;
+  },
+
   /** Restore a soft-deleted book by clearing deletedAt and resetting processing state */
   async restore(id: string, data?: Partial<{ processingStatus: string; structureSource: string }>) {
     const [restored] = await db

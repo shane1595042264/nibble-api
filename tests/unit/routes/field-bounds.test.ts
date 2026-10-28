@@ -393,6 +393,12 @@ describe('books updateMetadataSchema', () => {
   it('rejects 101-char language', () => {
     expect(updateMetadataSchema.safeParse({ language: 'l'.repeat(101) }).success).toBe(false);
   });
+
+  it('caps coverUrl at 2048 chars like the other cover schemas (KAN-371)', () => {
+    const ok = 'https://x.test/' + 'a'.repeat(2048 - 'https://x.test/'.length);
+    expect(updateMetadataSchema.safeParse({ coverUrl: ok }).success).toBe(true);
+    expect(updateMetadataSchema.safeParse({ coverUrl: ok + 'a' }).success).toBe(false);
+  });
 });
 
 describe('books createBookSchema / updateBookSchema customTitle + coverUrl bounds', () => {

@@ -9,6 +9,7 @@ const bookRepo = vi.hoisted(() => ({
   create: vi.fn(),
   findCatalogByHash: vi.fn(),
   updateCatalog: vi.fn(),
+  hasOtherLiveHolder: vi.fn(),
   touchCatalog: vi.fn(),
   incrementCatalogUserCount: vi.fn(),
   findDeletedByUserIdAndCatalogId: vi.fn(),
@@ -453,6 +454,7 @@ describe('bookService.updateBookMetadata never writes the shared catalog title (
     bookRepo.findById.mockReset().mockResolvedValue(BOOK);
     bookRepo.findCatalogById.mockReset().mockResolvedValue({ id: CATALOG_ID, title: 'Shared Catalog Title' });
     bookRepo.updateCatalog.mockReset().mockResolvedValue({ id: CATALOG_ID, title: 'Shared Catalog Title' });
+    bookRepo.hasOtherLiveHolder.mockReset().mockResolvedValue(false);
   });
 
   it('drops title and writes nothing at all when title is the only field', async () => {
@@ -479,6 +481,50 @@ describe('bookService.updateBookMetadata never writes the shared catalog title (
     await expect(
       bookService.updateBookMetadata('book-1', USER_ID, { author: 'New Author' }),
     ).rejects.toMatchObject({ status: 404 });
+    expect(bookRepo.updateCatalog).not.toHaveBeenCalled();
+  });
+});
+
+// Regression coverage for KAN-371: KAN-323 only held back title. author, coverUrl,
+// description etc. still went to the SHARED book_catalog row, so any user who added a
+// Marketplace book could rewrite them for every other holder and the public listing.
+describe('bookService.updateBookMetadata leaves a catalog row other users hold alone (KAN-371)', () => {
+  const BOOK = { id: 'book-1', userId: USER_ID, catalogId: CATALOG_ID };
+  const CATALOG = { id: CATALOG_ID, title: 'Shared', author: 'Real Author' };
+
+  beforeEach(() => {
+    bookRepo.findById.mockReset().mockResolvedValue(BOOK);
+    bookRepo.findCatalogById.mockReset().mockResolvedValue(CATALOG);
+    bookRepo.updateCatalog.mockReset().mockResolvedValue({ ...CATALOG, author: 'New Author' });
+    bookRepo.hasOtherLiveHolder.mockReset();
+  });
+
+  it('does not write the catalog when another user holds it, and returns it unchanged', async () => {
+    bookRepo.hasOtherLiveHolder.mockResolvedValue(true);
+
+    const result = await bookService.updateBookMetadata('book-1', USER_ID, {
+      author: 'VANDAL',
+      coverUrl: 'https://example.com/x.png',
+    });
+
+    expect(bookRepo.hasOtherLiveHolder).toHaveBeenCalledWith(CATALOG_ID, USER_ID);
+    expect(bookRepo.updateCatalog).not.toHaveBeenCalled();
+    expect(result.catalog).toBe(CATALOG);
+  });
+
+  it('still writes the catalog when the caller is its sole live holder', async () => {
+    bookRepo.hasOtherLiveHolder.mockResolvedValue(false);
+
+    const result = await bookService.updateBookMetadata('book-1', USER_ID, { author: 'New Author' });
+
+    expect(bookRepo.updateCatalog).toHaveBeenCalledWith(CATALOG_ID, expect.objectContaining({ author: 'New Author' }));
+    expect(result.catalog).toMatchObject({ author: 'New Author' });
+  });
+
+  it('skips the holder lookup entirely when there is nothing to write', async () => {
+    await bookService.updateBookMetadata('book-1', USER_ID, { title: 'Rename only' });
+
+    expect(bookRepo.hasOtherLiveHolder).not.toHaveBeenCalled();
     expect(bookRepo.updateCatalog).not.toHaveBeenCalled();
   });
 });

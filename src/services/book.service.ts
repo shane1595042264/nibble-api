@@ -168,6 +168,13 @@ export const bookService = {
     // Nothing left to write — don't touch the shared row (not even its updated_at).
     if (Object.values(patch).every((v) => v === undefined)) return { book, catalog };
 
+    // Same bug class for every other field (KAN-371): once another user holds this catalog
+    // row, an author/cover/description edit here would rewrite it for them and for the
+    // Marketplace listing. Only the sole live holder may still write it; otherwise the
+    // shared row is left alone and the caller's edit stays local to their device.
+    // Admins edit shared rows via PUT /admin/catalog/:id.
+    if (await bookRepository.hasOtherLiveHolder(catalog.id, userId)) return { book, catalog };
+
     const updated = await bookRepository.updateCatalog(catalog.id, patch);
     return { book, catalog: updated };
   },
