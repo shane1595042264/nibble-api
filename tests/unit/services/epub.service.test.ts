@@ -268,3 +268,53 @@ describe('extractTextFromXhtml — inline tags (KAN-356)', () => {
     expect(text('<p>&amp;lt; &amp;amp; &amp;#39; &lt;b&gt; &amp;</p>')).toBe('&lt; &amp; &#39; <b> &');
   });
 });
+
+// ─── KAN-373 ─────────────────────────────────────────────────────────────────
+// The <h1>-<h6> / <title> fallback title skipped the entity decode the body
+// gets, so untocced chapters were named 'Q&amp;A' and 'Chapter&nbsp;3'.
+
+const titleOf = (xhtml: string) => extractTextFromXhtml(xhtml).title;
+
+describe('extractTextFromXhtml — fallback titles are entity-decoded (KAN-373)', () => {
+  it('decodes a named entity in the in-body heading', () => {
+    expect(titleOf('<html><body><h1>Q&amp;A with the Chef</h1><p>x</p></body></html>')).toBe('Q&A with the Chef');
+  });
+
+  it('decodes a numeric entity in the <title> tag', () => {
+    expect(titleOf('<html><head><title>Don&#8217;t Rinse the Rice</title></head><body><p>x</p></body></html>')).toBe(
+      'Don\u2019t Rinse the Rice',
+    );
+  });
+
+  it('turns &nbsp; into a plain space in the heading', () => {
+    expect(titleOf('<html><body><h2>Chapter&nbsp;3: Salt &amp; Fat</h2><p>x</p></body></html>')).toBe(
+      'Chapter 3: Salt & Fat',
+    );
+  });
+
+  it('decodes an escaped entity once', () => {
+    expect(titleOf('<html><body><h1>Using &amp;lt;b&amp;gt; &lt;i&gt;</h1></body></html>')).toBe('Using &lt;b&gt; <i>');
+  });
+
+  it('falls back to <title> when the heading is only an entity space', () => {
+    expect(titleOf('<html><head><title>Salt</title></head><body><h1>&nbsp;</h1><p>x</p></body></html>')).toBe('Salt');
+  });
+
+  it('names an untocced chapter with the decoded heading', () => {
+    const chapters: ChapterSpec[] = [
+      { href: 'Text/chap01.xhtml', path: 'Text/chap01.xhtml', tocTitle: 'The Bronze Key' },
+      { href: 'Text/chap02.xhtml', path: 'Text/chap02.xhtml', tocTitle: null, heading: 'Q&amp;A with the Chef' },
+    ];
+    expect(parseEpub(buildEpub3(chapters)).chapters.map((c) => c.title)).toEqual([
+      'The Bronze Key',
+      'Q&A with the Chef',
+    ]);
+  });
+
+  it('recognises an entity-encoded heading as the book title', () => {
+    const chapters: ChapterSpec[] = [
+      { href: 'Text/chap01.xhtml', path: 'Text/chap01.xhtml', tocTitle: null, heading: 'My&nbsp;Great Book' },
+    ];
+    expect(parseEpub(buildEpub3(chapters)).chapters.map((c) => c.title)).toEqual(['Chapter 1']);
+  });
+});

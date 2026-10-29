@@ -350,6 +350,28 @@ function parseTocTitles(tocXml: string, tocDir: string): Map<string, string> {
 }
 
 /**
+ * Decode common HTML entities, plus numeric ones. &amp; goes last so an
+ * escaped entity (&amp;lt;) decodes once, to the literal text "&lt;".
+ */
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/gi, '&');
+}
+
+/** Decode a title's entities and collapse its whitespace; null when nothing is left. */
+function cleanTitle(raw: string): string | null {
+  return decodeEntities(raw).replace(/\s+/g, ' ').trim() || null;
+}
+
+/**
  * Strip XHTML content to readable plain text.
  * - Removes <script>/<style> blocks entirely
  * - Preserves paragraph breaks (</p>, </div>, </h1-6>, <br/> → \n)
@@ -360,7 +382,7 @@ export function extractTextFromXhtml(xhtml: string): { title: string | null; pla
   // Capture <title> for use as a fallback only — many publishers set the
   // same <title> on every chapter file, so we prefer in-body headings.
   const titleTagMatch = xhtml.match(/<title[^>]*>([^<]*)<\/title>/i);
-  const fallbackTitle: string | null = titleTagMatch?.[1]?.trim() || null;
+  const fallbackTitle = titleTagMatch?.[1] ? cleanTitle(titleTagMatch[1]) : null;
 
   let body = xhtml;
 
@@ -375,10 +397,7 @@ export function extractTextFromXhtml(xhtml: string): { title: string | null; pla
   // Prefer the first in-body <h1>-<h6> as the chapter title; <title> tag is the fallback.
   let docTitle: string | null = null;
   const h = body.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i);
-  if (h?.[1]) {
-    const stripped = h[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-    if (stripped) docTitle = stripped;
-  }
+  if (h?.[1]) docTitle = cleanTitle(h[1].replace(/<[^>]+>/g, ''));
   if (!docTitle) docTitle = fallbackTitle;
 
   // Block-level elements → newline
@@ -392,18 +411,7 @@ export function extractTextFromXhtml(xhtml: string): { title: string | null; pla
   // splits Butter<span>nut</span> and detaches <i>indica</i>, from its comma
   body = body.replace(/<[^>]+>/g, '');
 
-  // Decode entities — common set, plus numeric. &amp; goes last so an
-  // escaped entity (&amp;lt;) decodes once, to the literal text "&lt;".
-  body = body
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&apos;/gi, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
-    .replace(/&amp;/gi, '&');
+  body = decodeEntities(body);
 
   // Collapse whitespace: spaces within a line, blank lines between paragraphs
   body = body
