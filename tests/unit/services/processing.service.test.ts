@@ -85,7 +85,11 @@ vi.mock('../../../src/repositories/section.repository.js', () => ({
   sectionRepository: { softDeleteByBookId: sectionSoftDeleteMock, create: sectionCreateMock },
 }));
 
-import { markBookErrored, processingService } from '../../../src/services/processing.service.js';
+import {
+  buildStructureFromOutline,
+  markBookErrored,
+  processingService,
+} from '../../../src/services/processing.service.js';
 
 describe('markBookErrored (KAN-243)', () => {
   beforeEach(() => {
@@ -486,5 +490,115 @@ describe('orchestratePipeline - honours a cancelled job (KAN-332)', () => {
     });
     expect(failJobMock).not.toHaveBeenCalled();
     expect(refundFailedJobMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- Outline walk keeps document order (KAN-384) -----------------------------
+// A chapter whose outline mixes plain sections with sub-headed ones used to have
+// its plain leaves emitted first and its nested groups after, so reading order
+// and every page range derived from the reordered leaf list came out wrong.
+describe('buildStructureFromOutline - mixed-depth outline order (KAN-384)', () => {
+  const leaf = (title: string, pageNumber: number) => ({ title, pageNumber, children: [] });
+
+  const run = async (outline: any[], totalPages: number) => {
+    await buildStructureFromOutline('job-1', 'book-1', Buffer.from(''), outline, totalPages);
+    const chapters = chapterCreateMock.mock.calls.map(([c]) => c);
+    const sections = sectionCreateMock.mock.calls.map(([s]) => s);
+    return { chapters, sections };
+  };
+
+  beforeEach(() => {
+    chapterCreateMock.mockReset();
+    sectionCreateMock.mockReset().mockResolvedValue({ id: 'section-1' });
+    appendMock.mockReset().mockResolvedValue(undefined);
+    let n = 0;
+    chapterCreateMock.mockImplementation(async () => ({ id: `chapter-${++n}` }));
+  });
+
+  it('emits leaves in outline order with contiguous page ranges', async () => {
+    const { chapters, sections } = await run([
+      {
+        title: 'Ch3', pageNumber: 100, children: [
+          leaf('3.1', 100),
+          { title: '3.2', pageNumber: 105, children: [leaf('3.2.1', 105), leaf('3.2.2', 110)] },
+          leaf('3.3', 120),
+          leaf('Exercises', 130),
+        ],
+      },
+    ], 140);
+
+    expect(sections.map(s => [s.title, s.startPage, s.endPage])).toEqual([
+      ['3.1', 100, 104],
+      ['3.2.1', 105, 109],
+      ['3.2.2', 110, 119],
+      ['3.3', 120, 129],
+      ['Exercises', 130, 140],
+    ]);
+    expect(chapters.map(c => [c.title, c.startPage, c.endPage, c.sortOrder])).toEqual([
+      ['Ch3', 100, 104, 1],
+      ['Ch3 > 3.2', 105, 119, 2],
+      ['Ch3', 120, 140, 3],
+    ]);
+    // Each section lands in the chapter it was emitted under.
+    expect(sections.map(s => s.chapterId)).toEqual([
+      'chapter-1', 'chapter-2', 'chapter-2', 'chapter-3', 'chapter-3',
+    ]);
+  });
+
+  it('keeps a trailing Summary after the nested groups (Spring Boot shape)', async () => {
+    const { sections } = await run([
+      leaf('Acknowledgments', 16),
+      {
+        title: 'Ch1', pageNumber: 17, children: [
+          { title: 'Three Features', pageNumber: 17, children: [leaf('Starters', 17), leaf('Autoconfiguration', 20)] },
+          leaf('Summary', 22),
+        ],
+      },
+      { title: 'Ch2', pageNumber: 23, children: [leaf('Maven', 23)] },
+    ], 30);
+
+    expect(sections.map(s => [s.title, s.startPage, s.endPage])).toEqual([
+      ['Acknowledgments', 16, 16],
+      ['Starters', 17, 19],
+      ['Autoconfiguration', 20, 21],
+      ['Summary', 22, 22],
+      ['Maven', 23, 30],
+    ]);
+  });
+
+  it('still injects the Introduction ahead of a leading nested group', async () => {
+    const { chapters, sections } = await run([
+      {
+        title: 'Part 1', pageNumber: 1, children: [
+          { title: 'Ch1', pageNumber: 3, children: [leaf('1.1', 3), leaf('1.2', 5)] },
+          leaf('Afterword', 8),
+        ],
+      },
+    ], 10);
+
+    expect(chapters.map(c => c.title)).toEqual(['Part 1', 'Part 1 > Ch1', 'Part 1']);
+    expect(sections.map(s => [s.title, s.startPage, s.endPage])).toEqual([
+      ['Part 1 — Introduction', 1, 2],
+      ['1.1', 3, 4],
+      ['1.2', 5, 7],
+      ['Afterword', 8, 10],
+    ]);
+  });
+
+  it('leaves an outline with no mixed nesting structured exactly as before', async () => {
+    const { chapters, sections } = await run([
+      { title: 'Ch1', pageNumber: 1, children: [leaf('1.1', 1), leaf('1.2', 4)] },
+      { title: 'Ch2', pageNumber: 6, children: [leaf('2.1', 6)] },
+    ], 9);
+
+    expect(chapters.map(c => [c.title, c.startPage, c.endPage])).toEqual([
+      ['Ch1', 1, 5],
+      ['Ch2', 6, 9],
+    ]);
+    expect(sections.map(s => [s.title, s.startPage, s.endPage])).toEqual([
+      ['1.1', 1, 3],
+      ['1.2', 4, 5],
+      ['2.1', 6, 9],
+    ]);
   });
 });

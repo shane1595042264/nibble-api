@@ -750,44 +750,50 @@ function walkOutlineTree(
     } else {
       // Has nested children → grouping level, recurse
       const prefix = parentPrefix ? `${parentPrefix} > ${item.title}` : item.title;
-      const directLeaves = children.filter(c => !c.children || c.children.length === 0);
-      const nestedChildren = children.filter(c => c.children && c.children.length > 0);
 
       // Inject "Introduction" if parent starts before first child
-      const allChildren = [...directLeaves, ...nestedChildren];
-      const firstPage = allChildren.reduce((min: number | null, c) => {
+      const firstPage = children.reduce((min: number | null, c) => {
         if (c.pageNumber == null) return min;
         if (min == null) return c.pageNumber;
         return c.pageNumber < min ? c.pageNumber : min;
       }, null as number | null);
 
-      const introSections: { title: string; pageNumber: number | null }[] = [];
+      let pending: { title: string; pageNumber: number | null }[] = [];
       if (
         item.pageNumber != null &&
         firstPage != null &&
         item.pageNumber < firstPage
       ) {
-        introSections.push({
+        pending.push({
           title: `${item.title} — Introduction`,
           pageNumber: item.pageNumber,
         });
       }
 
-      if (directLeaves.length > 0 || introSections.length > 0) {
-        result.push({
-          chapterTitle: prefix,
-          sections: [
-            ...introSections,
-            ...directLeaves.map(c => ({ title: c.title, pageNumber: c.pageNumber })),
-          ],
-        });
+      // Walk children in outline order (KAN-384): consecutive direct leaves
+      // share a chapter, and each nested child recurses in place, so the flat
+      // leaf list — and every page range computed from it — stays in document
+      // order. A trailing leaf run (e.g. "Summary") becomes its own chapter.
+      const flush = () => {
+        if (pending.length > 0) {
+          result.push({ chapterTitle: prefix, sections: pending });
+          pending = [];
+        }
+      };
+      for (const c of children) {
+        if (c.children && c.children.length > 0) {
+          flush();
+          walkOutlineTree([c], prefix, result);
+        } else {
+          pending.push({ title: c.title, pageNumber: c.pageNumber });
+        }
       }
-      walkOutlineTree(nestedChildren, prefix, result);
+      flush();
     }
   }
 }
 
-async function buildStructureFromOutline(
+export async function buildStructureFromOutline(
   jobId: string,
   bookId: string,
   pdfBuffer: Buffer,
