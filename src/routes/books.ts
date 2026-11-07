@@ -30,12 +30,6 @@ export const BOOK_COVER_URL_MAX = 2048;
 
 // ─── Zod schemas ───────────────────────────────────────────────────
 
-export const createBookSchema = z.object({
-  catalogId: z.string().uuid(),
-  customTitle: z.string().max(BOOK_CUSTOM_TITLE_MAX).optional(),
-  coverUrl: z.string().url().max(BOOK_COVER_URL_MAX).optional(),
-});
-
 // processingStatus and structureSource are backend-managed (processing worker writes)
 // and intentionally omitted here. .strict() makes clients get a 400 when they send
 // any unlisted field rather than having it silently stripped.
@@ -50,17 +44,10 @@ export const updateBookSchema = z.object({
 
 // ─── Routes ────────────────────────────────────────────────────────
 
-// POST /match — check hash + fuzzy title match
-bookRoutes.post('/match', async (c) => {
-  const body = await c.req.json();
-  const schema = z.object({
-    fileHash: z.string(),
-    title: z.string().max(255).optional(),
-  });
-  const { fileHash, title } = schema.parse(body);
-  const result = await bookService.matchBook(fileHash, title);
-  return c.json(result);
-});
+// No POST /match or POST / (create from catalogId). Neither had a client caller,
+// and together they let any user find another user's upload by title, shelve it
+// and download it, bypassing the admin-only Marketplace (KAN-390). Books are
+// created by POST /upload (needs the file bytes) or admin add-to-shelf.
 
 // POST /upload — upload a PDF or EPUB
 bookRoutes.post('/upload', async (c) => {
@@ -127,17 +114,6 @@ bookRoutes.get('/:id', async (c) => {
   const id = assertUuidPathParam(c.req.param('id'), 'id');
   const book = await bookService.getBook(id, user.id);
   return c.json(book);
-});
-
-bookRoutes.post('/', async (c) => {
-  const user = c.get('user');
-  const body = await c.req.json();
-  const parsed = createBookSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new AppError('VALIDATION_ERROR', parsed.error.message, 400);
-  }
-  const book = await bookService.createBook(user.id, parsed.data);
-  return c.json(book, 201);
 });
 
 bookRoutes.put('/:id', async (c) => {

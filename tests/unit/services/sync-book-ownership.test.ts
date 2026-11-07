@@ -7,8 +7,8 @@ import { db, loadSyncService, resetDb } from './sync-harness.js';
 // as another user's book (or skipped for lacking a catalogId, which is every book
 // WordByWord sends). So pushing `books: [{ id: <victim's book> }]` alongside
 // children let a client INSERT chapters/sections under someone else's book and
-// UPDATE that user's existing chapters/sections. Only a book this user owns (or
-// just created in this push) may unlock its children.
+// UPDATE that user's existing chapters/sections. Only a book this user owns may
+// unlock its children. Sync no longer creates books at all (KAN-390).
 
 const syncService = await loadSyncService();
 
@@ -111,17 +111,19 @@ describe('syncService.sync — pushed book ids that do unlock their children', (
     expect(res.failedEntities).toMatchObject({ chapters: [], sections: [] });
   });
 
-  it('still accepts children under a book created in the same push', async () => {
+  it('but not a new book id pushed with any catalogId: sync never creates it (KAN-390)', async () => {
     const NEW_BOOK = '22222222-2222-4222-8222-222222222222';
-    await push({
+    const res = await push({
       books: [{ ...bookPush(NEW_BOOK), catalogId: '12121212-1212-4212-8212-121212121212' }] as any,
       chapters: [chapterPush(NEW_CHAPTER, NEW_BOOK)],
       sections: [sectionPush(NEW_SECTION, NEW_BOOK, NEW_CHAPTER)],
     });
 
-    expect(db.books.rows.get(NEW_BOOK)?.userId).toBe(USER);
-    expect(db.chapters.create).toHaveBeenCalledTimes(1);
-    expect(db.sections.create).toHaveBeenCalledTimes(1);
+    expect(db.books.create).not.toHaveBeenCalled();
+    expect(db.books.rows.has(NEW_BOOK)).toBe(false);
+    expect(db.chapters.create).not.toHaveBeenCalled();
+    expect(db.sections.create).not.toHaveBeenCalled();
+    expect(res.failedEntities.books).toEqual([]);
   });
 
   it("but not the user's own book once the server has soft-deleted it", async () => {

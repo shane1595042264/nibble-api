@@ -79,22 +79,9 @@ function withTombstones<T extends { id: string }>(rows: T[], tombstones: T[]): T
   return [...rows, ...extra];
 }
 
-// Allowlists for book create/update via sync. Columns not listed here —
-// processingStatus, structureSource, userId, catalogId (on update), etc. —
+// Allowlist for book updates via sync. Columns not listed here —
+// processingStatus, structureSource, userId, catalogId, etc. —
 // are backend-managed and must not be writable by the client.
-const BOOK_CREATE_FIELDS = [
-  'id',
-  'catalogId',
-  'customTitle',
-  'coverUrl',
-  'lastReadAt',
-  'lastAccessedSectionId',
-  'lastAccessedScrollProgress',
-  'lastAccessedWordIndex',
-  'createdAt',
-  'updatedAt',
-] as const;
-
 // No coverUrl: WordByWord's coverImage is usually a page-1 PNG data: URL rendered
 // on-device, and it must not be written into books.cover_url on every push.
 const BOOK_UPDATE_FIELDS = [
@@ -254,7 +241,6 @@ export const syncService = {
     };
 
     // Books
-    const createdBookIds = new Set<string>();
     for (const clientBook of payload.changes.books) {
       try {
         if (!isValidUuid(clientBook.id)) continue;
@@ -266,15 +252,11 @@ export const syncService = {
         const coerced = coerceDates(clientBook);
         const server = serverBookMap.get(clientBook.id) ?? null;
         if (!server) {
-          // catalogId (NOT NULL) is only needed to create the row. WordByWord never
-          // creates books through sync — uploads go through /books — so bookToSync
-          // doesn't send it; requiring it for updates made them unreachable.
-          if (!isValidUuid(clientBook.catalogId)) continue;
-          await bookRepository.create({
-            ...pickFields(coerced, BOOK_CREATE_FIELDS),
-            userId,
-          } as any);
-          createdBookIds.add(clientBook.id);
+          // Sync never creates books. WordByWord's only create path is POST
+          // /books/upload, which needs the file bytes. Creating a row for any
+          // client-supplied catalogId shelved another user's private upload and
+          // unlocked GET /books/:id/download for it (KAN-390).
+          continue;
         } else {
           // Security: skip books not owned by the authenticated user
           if (server.userId !== userId) continue;
@@ -302,11 +284,11 @@ export const syncService = {
 
     // After processing books, update the existence set so child entities aren't skipped.
     // Security: a pushed id is client-controlled, so it only unlocks its children if
-    // this push created the book or its live server row belongs to this user.
+    // its live server row belongs to this user.
     for (const clientBook of payload.changes.books) {
       if (!isValidUuid(clientBook.id)) continue;
       const server = serverBookMap.get(clientBook.id);
-      const owned = createdBookIds.has(clientBook.id) || (server?.userId === userId && !server.deletedAt);
+      const owned = server?.userId === userId && !server.deletedAt;
       if (clientBook.deletedAt || !owned) {
         existingBookIdSet.delete(clientBook.id);
       } else {

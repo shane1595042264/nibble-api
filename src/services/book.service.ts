@@ -102,18 +102,6 @@ export const bookService = {
     return book;
   },
 
-  async createBook(userId: string, data: { catalogId: string; customTitle?: string; coverUrl?: string }) {
-    const existing = await bookRepository.findByUserIdAndCatalogId(userId, data.catalogId);
-    if (existing) throw Errors.duplicateBook();
-    // catalogId is a well-formed UUID (Zod) but may reference no book_catalog row.
-    // Without this check the NOT NULL FK (onDelete: 'restrict') raises Postgres 23503,
-    // which falls through the global error handler as an opaque 500 'Unhandled error'.
-    // Surface a clean 404 instead.
-    const catalog = await bookRepository.findCatalogById(data.catalogId);
-    if (!catalog) throw Errors.notFound('Catalog entry');
-    return bookRepository.create({ ...data, userId });
-  },
-
   async updateBook(id: string, userId: string, data: Record<string, unknown>) {
     const book = await this.getBook(id, userId);
     return bookRepository.update(book.id, data);
@@ -177,21 +165,6 @@ export const bookService = {
 
     const updated = await bookRepository.updateCatalog(catalog.id, patch);
     return { book, catalog: updated };
-  },
-
-  async matchBook(fileHash: string, title?: string) {
-    // 1. Check exact hash match in book_catalog
-    const exactMatch = await bookRepository.findCatalogByHash(fileHash);
-    if (exactMatch) return { exactMatch, fuzzyMatches: [] };
-
-    // 2. If no exact match and title given, fuzzy search.
-    // Cap at top 25 — the upload UI only surfaces a handful of duplicate candidates.
-    let fuzzyMatches: any[] = [];
-    if (title) {
-      fuzzyMatches = await bookRepository.findCatalogByFuzzyTitle(title, 25);
-    }
-
-    return { exactMatch: null, fuzzyMatches };
   },
 
   async handleUpload(

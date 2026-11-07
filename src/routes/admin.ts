@@ -155,7 +155,7 @@ adminRoutes.delete('/catalog/:id', async (c) => {
 
   // books.catalogId is onDelete 'restrict', so deleting a catalog someone still
   // has on their shelf raises Postgres 23503 and surfaces as an opaque 500.
-  // Pre-flight the FK for an actionable 409, mirroring the createBook guard.
+  // Pre-flight the FK for an actionable 409.
   const referencingBooks = await bookRepository.countByCatalogId(id);
   if (referencingBooks > 0) {
     throw Errors.conflict(

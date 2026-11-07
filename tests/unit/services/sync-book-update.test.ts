@@ -6,7 +6,7 @@ import { db, loadSyncService, resetDb } from './sync-harness.js';
 // every pushed book without one BEFORE looking up the server row, so the update
 // path was unreachable from the real client: on prod, 0 of 13 books had ever had
 // last_read_at or a reading position written, and renames never left the device.
-// catalogId is only needed to INSERT a row, so only the create branch requires it.
+// Sync never INSERTs a book, so catalogId is not needed at all (KAN-390).
 
 const syncService = await loadSyncService();
 
@@ -122,11 +122,15 @@ describe('syncService.sync — a book pushed in bookToSync shape (no catalogId)'
     expect(res.failedEntities.books).toEqual([]);
   });
 
-  it('still needs a catalogId to create a book the server has never seen', async () => {
+  it('never creates a book the server has never seen, catalogId or not (KAN-390)', async () => {
     const UNKNOWN = '22222222-2222-4222-8222-222222222222';
-    const res = await push({ books: [bookPush({ id: UNKNOWN })] as any });
+    const UNKNOWN_2 = '23232323-2323-4323-8323-232323232323';
+    const res = await push({
+      books: [bookPush({ id: UNKNOWN }), bookPush({ id: UNKNOWN_2, catalogId: '12121212-1212-4212-8212-121212121212' })] as any,
+    });
 
     expect(db.books.create).not.toHaveBeenCalled();
+    expect(db.books.rows.has(UNKNOWN_2)).toBe(false);
     expect(db.books.rows.has(UNKNOWN)).toBe(false);
     expect(res.failedEntities.books).toEqual([]);
   });
