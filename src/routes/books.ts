@@ -13,11 +13,29 @@ export const bookRoutes = new Hono();
 
 /** Strip characters unsafe for Content-Disposition filenames and limit length */
 function sanitizeFilename(name: string, maxLength = 100): string {
-  return name
-    .replace(/["\\\r\n\x00-\x1f]/g, '') // remove quotes, backslashes, control chars
-    .replace(/[/:*?<>|]/g, '_')          // replace filesystem-unsafe chars
-    .slice(0, maxLength)
-    .trim() || 'download';
+  const cleaned = name
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD') // lone surrogates break encodeURIComponent
+    .replace(/["\\\r\n\x00-\x1f\x7f]/g, '') // remove quotes, backslashes, control chars
+    .replace(/[/:*?<>|]/g, '_');             // replace filesystem-unsafe chars
+  // Truncate by code point so a surrogate pair is never split in half.
+  return Array.from(cleaned).slice(0, maxLength).join('').trim() || 'download';
+}
+
+/**
+ * RFC 6266 Content-Disposition. Header values must be ByteStrings, so a raw
+ * em dash, curly quote or CJK title made Headers.set throw and the download
+ * 500 (KAN-391). filename= is an ASCII-only fallback; filename*= carries the
+ * real title as percent-encoded UTF-8.
+ */
+export function contentDisposition(title: string, ext: string): string {
+  const name = `${sanitizeFilename(title)}.${ext}`;
+  const asciiName = name.replace(/[^\x20-\x7e]/g, '_');
+  // encodeURIComponent leaves ' ( ) * alone, but RFC 5987 attr-char excludes them.
+  const encodedName = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`;
 }
 
 // ─── Field limits ──────────────────────────────────────────────────
@@ -144,16 +162,19 @@ bookRoutes.get('/:id/download', async (c) => {
   const [pdfFile] = await db.select().from(pdfFiles).where(eq(pdfFiles.fileHash, catalog.fileHash)).limit(1);
   if (!pdfFile) throw new AppError('NOT_FOUND', 'PDF file not found', 404);
 
+  const isEpub = catalog.format === 'epub';
+  const contentType = isEpub ? 'application/epub+zip' : 'application/pdf';
+  const ext = isEpub ? 'epub' : 'pdf';
+  // Built before the R2 stream opens, so a throw here can't leave it open.
+  const disposition = contentDisposition(catalog.title || 'book', ext);
+
   const { storageService } = await import('../services/storage.service.js');
   // Stream the R2 body straight through. Buffering it here cost ~2x the file
   // size in heap per request, and the largest stored book is 77 MB (KAN-329).
   const { stream, contentLength } = await storageService.openBookFileStream(pdfFile.r2Key);
 
-  const isEpub = catalog.format === 'epub';
-  const contentType = isEpub ? 'application/epub+zip' : 'application/pdf';
-  const ext = isEpub ? 'epub' : 'pdf';
   c.header('Content-Type', contentType);
-  c.header('Content-Disposition', `attachment; filename="${sanitizeFilename(catalog.title || 'book')}.${ext}"`);
+  c.header('Content-Disposition', disposition);
   // Set Content-Length explicitly so streaming does not silently downgrade the
   // response to chunked encoding — clients keep seeing the same headers as before.
   if (contentLength !== undefined) c.header('Content-Length', String(contentLength));
