@@ -269,6 +269,7 @@ export const bookService = {
           bookId: existing.id,
           status: 'pending',
         }).returning();
+        await processingLogRepository.recordMode(job.id, mode, tx);
 
         await bookRepository.update(existing.id, { processingStatus: 'processing' });
         return { jobId: job.id, shouldStartPipeline: true };
@@ -319,6 +320,7 @@ export const bookService = {
           bookId: deleted.id,
           status: 'pending',
         }).returning();
+        await processingLogRepository.recordMode(job.id, mode, tx);
 
         await bookRepository.update(deleted.id, { processingStatus: 'processing' });
         return { jobId: job.id, shouldStartPipeline: true };
@@ -358,6 +360,7 @@ export const bookService = {
         bookId: book.id,
         status: 'pending',
       }).returning();
+      await processingLogRepository.recordMode(job.id, mode, tx);
 
       await bookRepository.update(book.id, { processingStatus: 'processing' });
       return { jobId: job.id, shouldStartPipeline: true };

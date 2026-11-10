@@ -4,7 +4,7 @@ import { billingRepository } from '../repositories/billing.repository.js';
 import { billingService } from '../services/billing.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
 import { bookService } from '../services/book.service.js';
-import { processingLogRepository } from '../repositories/processing-log.repository.js';
+import { processingLogRepository, type PipelineMode } from '../repositories/processing-log.repository.js';
 import { db } from '../db/index.js';
 import { nibCache, processingJobs } from '../db/schema.js';
 import { chapterRepository } from '../repositories/chapter.repository.js';
@@ -125,7 +125,7 @@ processingRoutes.post('/:jobId/retry', async (c) => {
   // /retry and a terminal state — so if anything below it fails, the claim has
   // to roll back with it or the book is left with a job that can never be
   // retried again (KAN-302).
-  let outcome: { kind: 'claim-failed' } | { kind: 'no-book' } | { kind: 'created'; newJob: typeof processingJobs.$inferSelect; bookId: string; fileHash: string };
+  let outcome: { kind: 'claim-failed' } | { kind: 'no-book' } | { kind: 'created'; newJob: typeof processingJobs.$inferSelect; bookId: string; fileHash: string; mode: PipelineMode };
   try {
     outcome = await db.transaction(async (tx) => {
       const claimed = await processingLogRepository.claimFailedForRetry(jobId, user.id, tx);
@@ -155,7 +155,12 @@ processingRoutes.post('/:jobId/retry', async (c) => {
         status: 'pending',
       }).returning();
 
-      return { kind: 'created' as const, newJob: createdJob, bookId: book.id, fileHash: claimed.fileHash };
+      // Re-run in the mode the user picked at upload, and carry it onto the new
+      // job so a second retry still finds it (KAN-396).
+      const mode = await processingLogRepository.getJobMode(claimed.id, tx);
+      await processingLogRepository.recordMode(createdJob.id, mode, tx);
+
+      return { kind: 'created' as const, newJob: createdJob, bookId: book.id, fileHash: claimed.fileHash, mode };
     });
   } catch (err) {
     // The pre-check above can still lose to an insert that committed after our
@@ -182,14 +187,14 @@ processingRoutes.post('/:jobId/retry', async (c) => {
     return c.json({ error: 'No book associated with this job' }, 400);
   }
 
-  const { newJob, bookId, fileHash } = outcome;
+  const { newJob, bookId, fileHash, mode } = outcome;
   await bookRepository.update(bookId, { processingStatus: 'processing' });
 
   // Fire-and-forget pipeline
   setTimeout(async () => {
     try {
       const { processingService } = await import('../services/processing.service.js');
-      await processingService.orchestratePipeline(newJob.id, fileHash, bookId);
+      await processingService.orchestratePipeline(newJob.id, fileHash, bookId, mode);
     } catch (err: any) {
       console.error('Retry processing pipeline failed:', err);
       const errorMessage = err?.message ?? 'Unknown error';

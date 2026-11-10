@@ -18,6 +18,18 @@ import { processingJobs, processingLogs } from '../db/schema.js';
  */
 const ACTIVE_JOB_STATUSES = ['pending', 'processing'];
 
+/**
+ * The processing mode a job was started with, kept as a processing_logs row
+ * because processing_jobs has no column for it. Only the upload path knows the
+ * user's choice, so without this a Retry or a stuck-job recovery re-ran a free
+ * 'TOC Only' upload as full paid processing (KAN-396).
+ */
+export type PipelineMode = 'full' | 'toc-only';
+const MODE_STAGE = 'mode';
+const modeMessage = (mode: string) => `Processing mode: ${mode}`;
+/** Stage 5b's skip line, the only trace of the mode on jobs from before KAN-396. */
+export const TOC_ONLY_MATHPIX_SKIP_MESSAGE = 'TOC-only mode — skipping Mathpix';
+
 export const processingLogRepository = {
   /** Insert a new log entry for a processing job. */
   async append(
@@ -31,6 +43,36 @@ export const processingLogRepository = {
       .values({ jobId, stage, message, level })
       .returning();
     return log;
+  },
+
+  /**
+   * Record the mode a job runs in. Call it inside the transaction that inserts
+   * the job, so a crash before the pipeline starts can't lose the mode.
+   */
+  async recordMode(jobId: string, mode: string, executor: Pick<typeof db, 'insert'> = db) {
+    await executor
+      .insert(processingLogs)
+      .values({ jobId, stage: MODE_STAGE, message: modeMessage(mode) });
+  },
+
+  /**
+   * The mode recorded for a job by recordMode. A job from before KAN-396 has no
+   * mode row: it counts as toc-only if its run reached Stage 5b's skip line, and
+   * otherwise gets 'full', which is what every re-run used to do.
+   */
+  async getJobMode(jobId: string, executor: Pick<typeof db, 'select'> = db): Promise<PipelineMode> {
+    const [row] = await executor
+      .select({ message: processingLogs.message })
+      .from(processingLogs)
+      .where(and(
+        eq(processingLogs.jobId, jobId),
+        or(eq(processingLogs.stage, MODE_STAGE), eq(processingLogs.message, TOC_ONLY_MATHPIX_SKIP_MESSAGE)),
+      ))
+      .orderBy(desc(processingLogs.timestamp))
+      .limit(1);
+    return row?.message === modeMessage('toc-only') || row?.message === TOC_ONLY_MATHPIX_SKIP_MESSAGE
+      ? 'toc-only'
+      : 'full';
   },
 
   /** Get logs for a job, optionally filtered by timestamp. Ordered by timestamp ascending. */

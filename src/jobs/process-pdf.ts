@@ -4,9 +4,10 @@ import { billingService } from '../services/billing.service.js';
 
 let running = false;
 
-async function runJob(job: { id: string; fileHash: string; bookId: string | null }) {
+// mode is set only for recovered jobs; paid jobs from pollForJobs run 'full'.
+async function runJob(job: { id: string; fileHash: string; bookId: string | null; mode?: string }) {
   try {
-    await processingService.orchestratePipeline(job.id, job.fileHash, job.bookId!);
+    await processingService.orchestratePipeline(job.id, job.fileHash, job.bookId!, job.mode);
     console.log(`Job ${job.id} completed`);
   } catch (error: any) {
     console.error(`Job ${job.id} failed:`, error.message);

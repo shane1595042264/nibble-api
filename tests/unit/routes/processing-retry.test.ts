@@ -12,6 +12,8 @@ const procLogRepo = vi.hoisted(() => ({
   findActiveJobByFileHash: vi.fn(),
   getJob: vi.fn(),
   failJob: vi.fn(),
+  getJobMode: vi.fn(),
+  recordMode: vi.fn(),
 }));
 vi.mock('../../../src/repositories/processing-log.repository.js', () => ({
   processingLogRepository: procLogRepo,
@@ -37,6 +39,12 @@ vi.mock('../../../src/repositories/billing.repository.js', () => ({ billingRepos
 vi.mock('../../../src/services/billing.service.js', () => ({ billingService: {} }));
 vi.mock('../../../src/services/book.service.js', () => ({ bookService: {} }));
 vi.mock('../../../src/services/storage.service.js', () => ({ storageService: {} }));
+
+// Dynamically imported by the handler's fire-and-forget pipeline kick-off.
+const orchestratePipeline = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/services/processing.service.js', () => ({ processingService: { orchestratePipeline } }));
+// Warm the module cache: under fake timers a cold dynamic import never settles.
+await import('../../../src/services/processing.service.js');
 
 const { processingRoutes } = await import('../../../src/routes/processing.js');
 const { errorHandler } = await import('../../../src/middleware/error-handler.js');
@@ -90,6 +98,9 @@ beforeEach(() => {
   procLogRepo.getJob.mockImplementation(async () => ({ ...sourceJob }));
   procLogRepo.findActiveJobByFileHash.mockResolvedValue(null);
   procLogRepo.failJob.mockResolvedValue(undefined);
+  procLogRepo.getJobMode.mockResolvedValue('full');
+  procLogRepo.recordMode.mockResolvedValue(undefined);
+  orchestratePipeline.mockResolvedValue(undefined);
   bookRepo.findById.mockResolvedValue({ id: BOOK_ID });
   bookRepo.update.mockResolvedValue(undefined);
   sectionRepo.softDeleteByBookId.mockResolvedValue(undefined);
@@ -201,5 +212,37 @@ describe('POST /processing/:jobId/retry — unchanged behaviour', () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'No book associated with this job' });
     expect(sectionRepo.softDeleteByBookId).not.toHaveBeenCalled();
+  });
+});
+
+// The upload dialog's 'TOC Only' mode skips Mathpix and Haiku OCR. Only the
+// upload path knew it, so Retry used to re-run a free upload as full paid
+// processing (KAN-396).
+describe('POST /processing/:jobId/retry — processing mode', () => {
+  it('re-runs a toc-only job as toc-only', async () => {
+    procLogRepo.getJobMode.mockResolvedValue('toc-only');
+
+    const res = await retry();
+    expect(res.status).toBe(200);
+    expect(procLogRepo.getJobMode).toHaveBeenCalledWith(JOB_ID, expect.anything());
+
+    await vi.runAllTimersAsync();
+    expect(orchestratePipeline).toHaveBeenCalledWith(NEW_JOB_ID, FILE_HASH, BOOK_ID, 'toc-only');
+  });
+
+  it('records the mode on the new job, inside the transaction, so a second retry keeps it', async () => {
+    procLogRepo.getJobMode.mockResolvedValue('toc-only');
+
+    expect((await retry()).status).toBe(200);
+    expect(procLogRepo.recordMode).toHaveBeenCalledWith(NEW_JOB_ID, 'toc-only', expect.anything());
+  });
+
+  it('re-runs a legacy job with no recorded mode as full, as before', async () => {
+    // getJobMode's own fallback for a job with no mode row.
+    procLogRepo.getJobMode.mockResolvedValue('full');
+
+    expect((await retry()).status).toBe(200);
+    await vi.runAllTimersAsync();
+    expect(orchestratePipeline).toHaveBeenCalledWith(NEW_JOB_ID, FILE_HASH, BOOK_ID, 'full');
   });
 });

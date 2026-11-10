@@ -35,6 +35,7 @@ const processingLogRepo = vi.hoisted(() => ({
   findActiveJobByFileHash: vi.fn(),
   failActiveJobsByBookId: vi.fn(),
   append: vi.fn(),
+  recordMode: vi.fn(),
 }));
 vi.mock('../../../src/repositories/processing-log.repository.js', () => ({ processingLogRepository: processingLogRepo }));
 
@@ -547,5 +548,68 @@ describe("bookService.deleteBook stops the book's active processing job (KAN-369
 
     await expect(bookService.deleteBook('book-1', USER_ID)).rejects.toMatchObject({ status: 404 });
     expect(processingLogRepo.failActiveJobsByBookId).not.toHaveBeenCalled();
+  });
+});
+
+// Only the upload knows the user's 'TOC Only' choice, so it has to be recorded
+// on the job, in the same transaction that creates it, for Retry and stuck-job
+// recovery to re-run in that mode instead of full paid processing (KAN-396).
+describe('handleUpload records the processing mode on the job (KAN-396)', () => {
+  const FILE_HASH = 'hash-mode';
+  let jobTx: unknown;
+
+  beforeEach(() => {
+    bookRepo.findCatalogByHash.mockReset().mockResolvedValue({ id: 'cat-mode', userCount: 1 });
+    bookRepo.touchCatalog.mockReset().mockResolvedValue(undefined);
+    bookRepo.incrementCatalogUserCount.mockReset().mockResolvedValue(undefined);
+    bookRepo.update.mockReset().mockResolvedValue(undefined);
+    bookRepo.findByUserIdAndCatalogId.mockReset();
+    bookRepo.findDeletedByUserIdAndCatalogId.mockReset().mockResolvedValue(null);
+    bookRepo.create.mockReset().mockResolvedValue({ id: 'book-new' });
+    processingLogRepo.findActiveJobByFileHash.mockReset().mockResolvedValue(null);
+    processingLogRepo.recordMode.mockReset().mockResolvedValue(undefined);
+    processingSvc.orchestratePipeline.mockReset().mockResolvedValue(undefined);
+    sectionRepo.softDeleteByBookId.mockReset().mockResolvedValue(undefined);
+    chapterRepo.softDeleteByBookId.mockReset().mockResolvedValue(undefined);
+    db.select.mockReset().mockReturnValue({
+      from: () => ({ where: () => ({ limit: () => Promise.resolve([{ id: 'file-mode' }]) }) }),
+    });
+    jobTx = {
+      select: () => ({ from: () => ({ where: () => ({ limit: () => Promise.resolve([]) }) }) }),
+      insert: () => ({ values: () => ({ returning: () => Promise.resolve([{ id: 'job-mode' }]) }) }),
+    };
+    (db as any).transaction = vi.fn(async (cb: (tx: any) => unknown) => cb(jobTx));
+  });
+
+  it('records toc-only on a new book\'s job inside the job transaction', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue(null);
+
+    await bookService.handleUpload(USER_ID, FILE_HASH, Buffer.from('x'), 10, 'T', undefined, 'toc-only');
+    expect(processingLogRepo.recordMode).toHaveBeenCalledWith('job-mode', 'toc-only', jobTx);
+
+    await flush();
+    expect(processingSvc.orchestratePipeline).toHaveBeenCalledWith('job-mode', FILE_HASH, 'book-new', 'toc-only');
+  });
+
+  it('records the mode when re-running an existing unfinished book', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue({ id: 'book-old', processingStatus: 'error' });
+
+    await bookService.handleUpload(USER_ID, FILE_HASH, Buffer.from('x'), 10, 'T', undefined, 'toc-only');
+    expect(processingLogRepo.recordMode).toHaveBeenCalledWith('job-mode', 'toc-only', jobTx);
+  });
+
+  it('records full for a default upload', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue(null);
+
+    await bookService.handleUpload(USER_ID, FILE_HASH, Buffer.from('x'), 10, 'T');
+    expect(processingLogRepo.recordMode).toHaveBeenCalledWith('job-mode', 'full', jobTx);
+  });
+
+  it('records nothing when it adopts the caller\'s own active job', async () => {
+    bookRepo.findByUserIdAndCatalogId.mockResolvedValue(null);
+    processingLogRepo.findActiveJobByFileHash.mockResolvedValue({ id: 'job-active', userId: USER_ID });
+
+    await bookService.handleUpload(USER_ID, FILE_HASH, Buffer.from('x'), 10, 'T', undefined, 'toc-only');
+    expect(processingLogRepo.recordMode).not.toHaveBeenCalled();
   });
 });

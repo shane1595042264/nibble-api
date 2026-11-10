@@ -5,7 +5,7 @@ import { parseEpub } from './epub.service.js';
 import { billingService } from './billing.service.js';
 import type { RefundOutcome } from './billing.service.js';
 import { bookRepository } from '../repositories/book.repository.js';
-import { processingLogRepository } from '../repositories/processing-log.repository.js';
+import { processingLogRepository, TOC_ONLY_MATHPIX_SKIP_MESSAGE } from '../repositories/processing-log.repository.js';
 import { chapterRepository } from '../repositories/chapter.repository.js';
 import { sectionRepository } from '../repositories/section.repository.js';
 import { NibParser } from '../lib/nib/parser.js';
@@ -310,7 +310,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
 
       // ── Stage 5b: Mathpix rich content (skip in toc-only mode) ──────
       if (mode === 'toc-only') {
-        await processingLogRepository.append(jobId, 'mathpix', 'TOC-only mode — skipping Mathpix');
+        await processingLogRepository.append(jobId, 'mathpix', TOC_ONLY_MATHPIX_SKIP_MESSAGE);
         await advance(jobId, 80, 'mathpix');
       } else {
       const { mathpixService } = await import('./mathpix.service.js');

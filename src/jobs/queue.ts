@@ -1,4 +1,5 @@
 import { billingRepository } from '../repositories/billing.repository.js';
+import type { PipelineMode } from '../repositories/processing-log.repository.js';
 
 type StuckJobRow = {
   id: string;
@@ -12,7 +13,7 @@ export type StuckJobAction =
   | { id: string; action: 'retry' }
   | { id: string; action: 'auto-fail'; stripePaymentIntentId: string | null };
 
-export type RecoveredJob = { id: string; fileHash: string; bookId: string | null };
+export type RecoveredJob = { id: string; fileHash: string; bookId: string | null; mode: PipelineMode };
 export type AutoFailedJob = { id: string; bookId: string | null; stripePaymentIntentId: string | null };
 
 const STUCK_THRESHOLD_MS = 10 * 60 * 1000;
@@ -80,6 +81,7 @@ export const jobQueue = {
     const { inFlightJobIds } = await import('./in-flight.js');
     const { sectionRepository } = await import('../repositories/section.repository.js');
     const { chapterRepository } = await import('../repositories/chapter.repository.js');
+    const { processingLogRepository } = await import('../repositories/processing-log.repository.js');
 
     const stuckThreshold = new Date(Date.now() - STUCK_THRESHOLD_MS);
     // Re-checked on every claim: whichever sweeper flips the row first bumps
@@ -119,6 +121,8 @@ export const jobQueue = {
             .where(stillStuck(a.id))
             .returning();
           if (!job) return null;
+          // Same job id, so the mode recorded at upload is still on it (KAN-396).
+          const mode = await processingLogRepository.getJobMode(job.id, tx);
           if (job.bookId) {
             // The dead run may have built part of the structure already; the
             // re-run builds it from scratch. Soft-delete, as the /retry route does,
@@ -128,9 +132,9 @@ export const jobQueue = {
             await tx.update(books).set({ processingStatus: 'processing' })
               .where(eq(books.id, job.bookId));
           }
-          return job;
+          return { ...job, mode };
         });
-        if (claimed) resumed.push({ id: claimed.id, fileHash: claimed.fileHash, bookId: claimed.bookId });
+        if (claimed) resumed.push({ id: claimed.id, fileHash: claimed.fileHash, bookId: claimed.bookId, mode: claimed.mode });
       } else {
         const [job] = await db
           .update(processingJobs)
