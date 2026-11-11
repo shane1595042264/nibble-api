@@ -45,6 +45,17 @@ export function contentDisposition(title: string, ext: string): string {
 // Precedent: SECTION_TITLE_MAX & co. in sections.ts, imported by sync.ts.
 export const BOOK_CUSTOM_TITLE_MAX = 500;
 export const BOOK_COVER_URL_MAX = 2048;
+export const BOOK_AUTHOR_MAX = 500;
+
+/**
+ * POST /upload's title/author come from the file's own metadata, not from
+ * anything the user typed, so an over-long value is cut rather than 400ing the
+ * whole upload (KAN-398). Truncates by code point so a surrogate pair survives.
+ */
+export function clampUploadField(value: string, max: number): string {
+  const chars = Array.from(value.trim());
+  return chars.length <= max ? chars.join('') : chars.slice(0, max).join('').trimEnd();
+}
 
 // ─── Zod schemas ───────────────────────────────────────────────────
 
@@ -104,8 +115,8 @@ bookRoutes.post('/upload', async (c) => {
   const rawMode = (formData.get('mode') as string) || 'full';
 
   const uploadFields = z.object({
-    title: z.string().max(255),
-    author: z.string().max(255).optional(),
+    title: z.string().transform(v => clampUploadField(v, BOOK_CUSTOM_TITLE_MAX)),
+    author: z.string().transform(v => clampUploadField(v, BOOK_AUTHOR_MAX)).optional(),
     totalPages: z.coerce.number().int().min(0).max(10000),
     mode: z.enum(['full', 'toc-only']),
   }).safeParse({ title: rawTitle, author: rawAuthor || undefined, totalPages: rawTotalPages, mode: rawMode });
