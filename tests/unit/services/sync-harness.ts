@@ -11,6 +11,9 @@ const pkViolation = (table: string) =>
     cause: Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' }),
   });
 
+/** Page size of the chapter/section pull queries (MAX_LIST_ROWS in prod); tests lower it to force paging. */
+export const pull = { pageSize: 5000 };
+
 /** In-memory table with the same soft-delete + primary-key semantics as the real repositories. */
 export function table(name: string) {
   const rows = new Map<string, Row>();
@@ -39,8 +42,12 @@ export function table(name: string) {
       if (row) Object.assign(row, { deletedAt: new Date(), updatedAt: new Date() });
       return row ?? null;
     }),
-    async findModifiedSinceForBooks(bookIds: string[], since: Date) {
-      return [...rows.values()].filter((r) => bookIds.includes(r.bookId as string) && r.updatedAt >= since);
+    async findModifiedSinceForBooks(bookIds: string[], since: Date, afterId?: string, limit = pull.pageSize) {
+      const matched = [...rows.values()]
+        .filter((r) => bookIds.includes(r.bookId as string) && r.updatedAt >= since && (!afterId || r.id > afterId))
+        .sort((x, y) => (x.id < y.id ? -1 : 1));
+      const page = matched.slice(0, limit);
+      return { rows: page, nextAfterId: matched.length > limit ? page[page.length - 1].id : null };
     },
     async findModifiedSince(userId: string, since: Date) {
       return [...rows.values()].filter((r) => r.userId === userId && r.updatedAt >= since);
@@ -60,6 +67,7 @@ export function resetDb() {
   db.sections = table('sections');
   db.vocab = table('vocabulary');
   forward.mockReset();
+  pull.pageSize = 5000;
 }
 
 /** Mock the repositories and the knowledge-base forward, then load the real sync service. */

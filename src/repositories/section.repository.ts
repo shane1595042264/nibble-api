@@ -1,4 +1,4 @@
-import { eq, and, isNull, gte, asc, inArray } from 'drizzle-orm';
+import { eq, and, isNull, gte, gt, asc, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { sections } from '../db/schema.js';
 import { MAX_LIST_ROWS, warnIfCapped } from '../lib/query-guards.js';
@@ -163,13 +163,23 @@ export const sectionRepository = {
     return warnIfCapped(rows, { entity: 'sections', scope: { bookId, since: since.toISOString() } });
   },
 
-  async findModifiedSinceForBooks(bookIds: string[], since: Date) {
-    if (bookIds.length === 0) return [];
+  // One page of the sync pull, keyed on id so a page boundary can never drop a
+  // row: the caller passes back nextAfterId until it is null. Fetches limit + 1
+  // to tell "exactly limit rows" from "more to come" without an empty extra page.
+  async findModifiedSinceForBooks(bookIds: string[], since: Date, afterId?: string, limit = MAX_LIST_ROWS) {
+    if (bookIds.length === 0) return { rows: [], nextAfterId: null };
     const rows = await db
       .select()
       .from(sections)
-      .where(and(inArray(sections.bookId, bookIds), gte(sections.updatedAt, since)))
-      .limit(MAX_LIST_ROWS);
-    return warnIfCapped(rows, { entity: 'sections', scope: { bookCount: bookIds.length, since: since.toISOString() } });
+      .where(and(
+        inArray(sections.bookId, bookIds),
+        gte(sections.updatedAt, since),
+        afterId ? gt(sections.id, afterId) : undefined,
+      ))
+      .orderBy(asc(sections.id))
+      .limit(limit + 1);
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    return { rows: page, nextAfterId: hasMore ? page[page.length - 1].id : null };
   },
 };

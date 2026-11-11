@@ -25,6 +25,17 @@ interface SyncPayload {
     settings: Record<string, unknown> | null;
     exerciseProgress: SyncEntity[];
   };
+  pullCursor?: PullCursor;
+}
+
+/**
+ * Where the next pull page starts, per entity: the last id sent. Only chapters
+ * and sections are paged (one book can carry thousands of sections); an entity
+ * missing from the cursor is finished.
+ */
+interface PullCursor {
+  chapters?: string;
+  sections?: string;
 }
 
 interface SyncResponse {
@@ -45,6 +56,8 @@ interface SyncResponse {
     exerciseProgress: string[];
   };
   syncedAt: string;
+  /** Set while chapters/sections remain past this page; echo it back with the same lastSyncedAt. */
+  pullCursor: PullCursor | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -587,15 +600,38 @@ export const syncService = {
     const ownedTombstones = <T extends { bookId: string }>(rows: T[]) =>
       rows.filter((r) => ownedTombstoneBookIds.has(r.bookId));
 
-    // Chapters & sections for all user books (batch query)
-    const serverChapters = withTombstones(
-      await chapterRepository.findModifiedSinceForBooks(allBookIds, since),
-      ownedTombstones(tombstones.chapters),
-    ) as unknown as SyncEntity[];
-    const serverSections = withTombstones(
-      await sectionRepository.findModifiedSinceForBooks(allBookIds, since),
-      ownedTombstones(tombstones.sections),
-    ) as unknown as SyncEntity[];
+    // Chapters & sections for all user books, one page each. A capped result
+    // used to be cut at an arbitrary 5000 rows with the client's watermark still
+    // advancing past the rest, so they never arrived (KAN-397). A continuation
+    // request (the client echoing pullCursor) gets only the rows past its cursor;
+    // everything else already came with the first page.
+    const cursor = payload.pullCursor;
+    const noPage = { rows: [], nextAfterId: null };
+    const chapterPage = cursor && !cursor.chapters
+      ? noPage
+      : await chapterRepository.findModifiedSinceForBooks(allBookIds, since, cursor?.chapters);
+    const sectionPage = cursor && !cursor.sections
+      ? noPage
+      : await sectionRepository.findModifiedSinceForBooks(allBookIds, since, cursor?.sections);
+    const serverChapters = withTombstones(chapterPage.rows, ownedTombstones(tombstones.chapters)) as unknown as SyncEntity[];
+    const serverSections = withTombstones(sectionPage.rows, ownedTombstones(tombstones.sections)) as unknown as SyncEntity[];
+    const nextCursor: PullCursor = {
+      ...(chapterPage.nextAfterId ? { chapters: chapterPage.nextAfterId } : {}),
+      ...(sectionPage.nextAfterId ? { sections: sectionPage.nextAfterId } : {}),
+    };
+    const pullCursor = Object.keys(nextCursor).length > 0 ? nextCursor : null;
+
+    if (cursor) {
+      return {
+        serverChanges: {
+          books: [], chapters: serverChapters, sections: serverSections,
+          vocabulary: [], settings: null, exerciseProgress: [], exercises: [],
+        },
+        failedEntities,
+        syncedAt: syncedAt.toISOString(),
+        pullCursor,
+      };
+    }
 
     // Vocabulary
     const serverVocabulary = withTombstones(await vocabularyRepository.findModifiedSince(userId, since), tombstones.vocabulary);
@@ -624,6 +660,7 @@ export const syncService = {
       },
       failedEntities,
       syncedAt: syncedAt.toISOString(),
+      pullCursor,
     };
   },
 };

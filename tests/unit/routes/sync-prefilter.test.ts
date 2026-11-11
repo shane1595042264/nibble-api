@@ -343,3 +343,24 @@ describe('POST /sync bounds pre-filter — full server echo round-trips clean (K
     });
   });
 });
+
+describe('POST /sync pullCursor (KAN-397)', () => {
+  const post = (body: unknown) =>
+    makeApp().request('/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const emptyChanges = { books: [], chapters: [], sections: [], vocabulary: [], settings: null, exerciseProgress: [] };
+
+  beforeEach(() => {
+    syncServiceMock.sync.mockResolvedValue({ serverChanges: {}, failedEntities: { books: [], chapters: [], sections: [], vocabulary: [], exerciseProgress: [] }, syncedAt: '', pullCursor: null });
+  });
+
+  it('passes a uuid cursor through to the sync service', async () => {
+    const res = await post({ lastSyncedAt: '1970-01-01T00:00:00.000Z', changes: emptyChanges, pullCursor: { sections: SECTION_ID } });
+    expect(res.status).toBe(200);
+    expect(syncServiceMock.sync.mock.calls.at(-1)![1].pullCursor).toEqual({ sections: SECTION_ID });
+  });
+
+  it('rejects a non-uuid cursor with a 400 before it reaches the uuid column', async () => {
+    const res = await post({ lastSyncedAt: '1970-01-01T00:00:00.000Z', changes: emptyChanges, pullCursor: { chapters: 'not-a-uuid' } });
+    expect(res.status).toBe(400);
+  });
+});

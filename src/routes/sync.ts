@@ -178,6 +178,11 @@ export const syncPayloadSchema = z.object({
     // than a second door onto an existing one.
     exerciseProgress: z.array(syncEntitySchema).max(MAX_SYNC_EXERCISE_PROGRESS).default([]),
   }),
+  // Echoed from the previous page's response; the ids reach a uuid column.
+  pullCursor: z.object({
+    chapters: z.string().uuid().optional(),
+    sections: z.string().uuid().optional(),
+  }).optional(),
 });
 
 // ─── Routes ─────────────────────────────────────────────────────────
