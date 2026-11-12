@@ -44,7 +44,7 @@ function manifestAndSpine(chapters: ChapterSpec[]): { items: string; refs: strin
 }
 
 /** EPUB 2: NCX toc, pointed at by spine@toc. */
-function buildEpub2(chapters: ChapterSpec[], opts: { tocPath?: string } = {}): Buffer {
+function buildEpub2(chapters: ChapterSpec[], opts: { tocPath?: string; metadata?: string } = {}): Buffer {
   const dir = 'OEBPS';
   const tocHref = opts.tocPath ?? 'toc.ncx';
   const zip = new AdmZip();
@@ -71,7 +71,7 @@ function buildEpub2(chapters: ChapterSpec[], opts: { tocPath?: string } = {}): B
     `${dir}/content.opf`,
     Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
-<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>My Great Book</dc:title><dc:creator>A. Writer</dc:creator></metadata>
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">${opts.metadata ?? '<dc:title>My Great Book</dc:title><dc:creator>A. Writer</dc:creator>'}</metadata>
 <manifest><item id="ncx" href="${tocHref}" media-type="application/x-dtbncx+xml"/>${items}</manifest>
 <spine toc="ncx">${refs}</spine></package>`),
   );
@@ -80,7 +80,7 @@ function buildEpub2(chapters: ChapterSpec[], opts: { tocPath?: string } = {}): B
 }
 
 /** EPUB 3: nav XHTML marked properties="nav", no NCX at all. */
-function buildEpub3(chapters: ChapterSpec[], opts: { tocPath?: string } = {}): Buffer {
+function buildEpub3(chapters: ChapterSpec[], opts: { tocPath?: string; metadata?: string } = {}): Buffer {
   const dir = 'OEBPS';
   const tocHref = opts.tocPath ?? 'nav.xhtml';
   const zip = new AdmZip();
@@ -108,7 +108,7 @@ function buildEpub3(chapters: ChapterSpec[], opts: { tocPath?: string } = {}): B
     `${dir}/content.opf`,
     Buffer.from(`<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
-<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>My Great Book</dc:title><dc:creator>A. Writer</dc:creator></metadata>
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">${opts.metadata ?? '<dc:title>My Great Book</dc:title><dc:creator>A. Writer</dc:creator>'}</metadata>
 <manifest><item id="nav" href="${tocHref}" media-type="application/xhtml+xml" properties="nav"/>${items}</manifest>
 <spine>${refs}</spine></package>`),
   );
@@ -226,6 +226,40 @@ describe('parseEpub — title fallback chain is unchanged (KAN-309 negative cont
     const zip = new AdmZip(buildEpub3(chapters));
     zip.updateFile('OEBPS/Text/chap01.xhtml', Buffer.from(BODY(null, 'tiny')));
     expect(parseEpub(zip.toBuffer()).chapters).toHaveLength(0);
+  });
+});
+
+// ─── KAN-400 ─────────────────────────────────────────────────────────────────
+// fast-xml-parser turned all-digit element text into numbers, so a "1984"
+// title crashed the job (.trim on a number) and numeric NCX labels were dropped.
+
+const NUMERIC_LABELS: ChapterSpec[] = ['1', '2', '007', '1.10'].map((label, i) => ({
+  href: `Text/chap0${i + 1}.xhtml`,
+  path: `Text/chap0${i + 1}.xhtml`,
+  tocTitle: label,
+}));
+
+describe('parseEpub — numeric metadata and TOC labels stay strings (KAN-400)', () => {
+  it('keeps a numeric title and author that carry an id attribute', () => {
+    const book = parseEpub(
+      buildEpub3(REPRO, { metadata: '<dc:title id="t">1984</dc:title><dc:creator id="a">2023</dc:creator>' }),
+    );
+    expect(book.title).toBe('1984');
+    expect(book.author).toBe('2023');
+  });
+
+  it('keeps a bare numeric title instead of falling back to Untitled', () => {
+    const book = parseEpub(buildEpub2(REPRO, { metadata: '<dc:title>1984</dc:title><dc:creator>A. Writer</dc:creator>' }));
+    expect(book.title).toBe('1984');
+    expect(book.author).toBe('A. Writer');
+  });
+
+  it('keeps numeric NCX labels verbatim', () => {
+    expect(parseEpub(buildEpub2(NUMERIC_LABELS)).chapters.map((c) => c.title)).toEqual(['1', '2', '007', '1.10']);
+  });
+
+  it('keeps numeric nav labels verbatim', () => {
+    expect(parseEpub(buildEpub3(NUMERIC_LABELS)).chapters.map((c) => c.title)).toEqual(['1', '2', '007', '1.10']);
   });
 });
 

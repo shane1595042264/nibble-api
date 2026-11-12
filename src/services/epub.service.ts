@@ -19,10 +19,13 @@ export interface EpubBook {
 
 const MIN_CHAPTER_CHARS = 120;
 
+// parseTagValue off: element text stays a string, so a title like "1984" or a
+// TOC label like "007" isn't turned into a number the readers can't handle.
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   alwaysCreateTextNode: false,
+  parseTagValue: false,
   parseAttributeValue: false,
   removeNSPrefix: false,
   trimValues: true,
@@ -201,6 +204,7 @@ function localName(key: string): string {
 const navParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
+  parseTagValue: false,
   parseAttributeValue: false,
   removeNSPrefix: false,
   trimValues: true,
