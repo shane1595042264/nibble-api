@@ -5,10 +5,10 @@ import { userRepository } from '../repositories/user.repository.js';
 import { storageService } from '../services/storage.service.js';
 import { AppError } from '../lib/errors.js';
 import { checkFailureLockout, recordFailure } from '../middleware/rate-limit.js';
+import { MAX_AVATAR_SIZE } from '../middleware/body-limit.js';
 
 export const userRoutes = new Hono();
 
-const MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2 MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const R2_AVATAR_PREFIX = 'r2:';
 const R2_AVATAR_KEY_PREFIX = 'avatars/';

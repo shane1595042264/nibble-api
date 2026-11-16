@@ -11,6 +11,7 @@ import { authMiddleware } from './middleware/auth.js';
 import { adminMiddleware } from './middleware/admin.js';
 import { rateLimiter } from './middleware/rate-limit.js';
 import { aiAccessMiddleware } from './middleware/ai-access.js';
+import { uploadBodyLimit, avatarBodyLimit } from './middleware/body-limit.js';
 import { healthRoutes } from './routes/health.js';
 import { bookRoutes } from './routes/books.js';
 import { chapterRoutes } from './routes/chapters.js';
@@ -66,7 +67,7 @@ app.post('/billing/webhook', async (c) => {
 });
 
 // Auth-protected routes
-app.use('/books/upload', authMiddleware, rateLimiter(15, 3600000));
+app.use('/books/upload', authMiddleware, rateLimiter(15, 3600000), uploadBodyLimit);
 app.use('/books/*', authMiddleware, rateLimiter(120));
 app.use('/books/:id/suggest-structure', rateLimiter(60), aiAccessMiddleware);
 app.use('/chapters/*', authMiddleware, rateLimiter(120));
@@ -85,7 +86,7 @@ app.use('/processing/*', authMiddleware);
 app.on(['GET', 'HEAD'], '/processing/*', rateLimiter(240));
 app.on('POST', '/processing/*', rateLimiter(30));
 app.use('/billing/*', authMiddleware, rateLimiter(10, 60_000));
-app.use('/users/me/avatar', authMiddleware, rateLimiter(5, 3600000));
+app.use('/users/me/avatar', authMiddleware, rateLimiter(5, 3600000), avatarBodyLimit);
 // Password changes are the most expensive request the API serves: bcryptjs is
 // pure JS with no thread pool, so compare + hash at rounds=12 blocks the single
 // Node process for ~375ms. users.ts's checkFailureLockout only ticks on WRONG

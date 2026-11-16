@@ -42,6 +42,12 @@ export const errorHandler: ErrorHandler = (err, c) => {
     const e = Errors.aiError('The AI service rejected the request');
     return c.json({ error: { code: e.code, message: e.message, status: e.status } }, 502);
   }
+  // A chunked body that ran past bodyLimit's cap (middleware/body-limit.ts).
+  // The middleware swaps in its own 413 after this returns; answering here
+  // just keeps a rejected oversized upload out of the error log (KAN-404).
+  if (err.name === 'BodyLimitError') {
+    return c.json({ error: { code: 'PAYLOAD_TOO_LARGE', message: 'Payload too large', status: 413 } }, 413);
+  }
   console.error('Unhandled error:', err);
   return c.json(
     { error: { code: 'INTERNAL_ERROR', message: 'Internal server error', status: 500 } },

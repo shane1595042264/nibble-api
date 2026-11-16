@@ -84,7 +84,8 @@ bookRoutes.post('/upload', async (c) => {
   const file = formData.get('file') as File;
   if (!file) return c.json({ error: 'No file provided' }, 400);
 
-  // Validate file size before loading into memory
+  // uploadBodyLimit (index.ts) already capped the request body; this checks the
+  // file part itself, which the multipart overhead allowance could let run over.
   const maxBytes = config.MAX_UPLOAD_SIZE_MB * 1024 * 1024;
   if (file.size > maxBytes) {
     return c.json({ error: `File size exceeds the ${config.MAX_UPLOAD_SIZE_MB}MB limit` }, 413);
