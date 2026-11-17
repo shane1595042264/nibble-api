@@ -186,3 +186,12 @@ describe('addKey', () => {
     expect(repoMock.upsertKey).not.toHaveBeenCalled();
   });
 });
+
+describe('reader-facing copy', () => {
+  it("never doubles the provider's own full stop", async () => {
+    repoMock.listKeys.mockResolvedValue([key('gemini', { defaultModel: 'gemini-2.5-flash-lite' })]);
+    providerMock.generate.mockRejectedValueOnce(new ProviderError('auth', 400, 'API key not valid. Please pass a valid API key.'));
+    const err = await runAi(USER, 'translate-word', { prompt: 'p', maxTokens: 5 }).catch((e) => e);
+    expect(err.message).toBe('Google Gemini rejected your key: API key not valid. Please pass a valid API key. Check it in Settings > AI.');
+  });
+});

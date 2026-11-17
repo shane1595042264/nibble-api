@@ -202,9 +202,12 @@ function noKeyError(keys: repo.KeyRow[], needsImages: boolean): AppError {
 
 function providerAppError(provider: AiProvider, err: ProviderError): AppError {
   const label = PROVIDER_LABEL[provider];
+  // Provider messages usually end in a full stop ("API key not valid. Please
+  // pass a valid API key."); drop it so the sentence we add doesn't read "..".
+  const reason = err.message.replace(/[.\s]+$/, '');
   switch (err.kind) {
     case 'auth':
-      return new AppError('AI_KEY_REJECTED', `${label} rejected your key: ${err.message}. Check it in Settings > AI.`, 409);
+      return new AppError('AI_KEY_REJECTED', `${label} rejected your key: ${reason}. Check it in Settings > AI.`, 409);
     case 'quota':
       return new AppError('AI_KEY_REJECTED', `Your ${label} account can't run this: ${err.message}`, 409);
     case 'rate':
