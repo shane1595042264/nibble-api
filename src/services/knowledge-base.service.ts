@@ -186,10 +186,11 @@ export async function forwardVocabToKnowledgeBase(
     // updatedAt and re-forward the same word on every sync forever (the
     // "sync partial — N items will retry" loop, KAN-230). Return a best-effort
     // entry synthesized from the input so the caller treats it as delivered:
-    // the kb-forward outbox marks the word forwarded (it also relies on this
-    // when a word is re-sent after a lost acknowledgement). The synthetic id is
-    // never used (the PG row keeps the client's own id) and the KB has no GET
-    // to recover the real one.
+    // the kb-forward outbox marks the word forwarded. (Note: the KB's single
+    // POST /notes path always returns the entry it created; it does NOT dedup
+    // across requests, so a re-send creates a second card. See kb-forward.ts.)
+    // The synthetic id is never used (the PG row keeps the client's own id)
+    // and the KB has no GET to recover the real one.
     return {
       id: '',
       word: input.word,

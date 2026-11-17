@@ -16,10 +16,18 @@
  * Concurrency: each word is claimed with a lease (kb_next_attempt_at pushed
  * past the forward timeout) under FOR UPDATE SKIP LOCKED, so two instances
  * (e.g. old and new container during a deploy) never forward the same word at
- * once. A forward that succeeds but fails to be recorded is re-sent after the
- * lease; the KB treats that as a dedup (2xx, no entries), which counts as
- * success. All writes are raw SQL so updated_at never moves: these columns are
+ * once. All writes are raw SQL so updated_at never moves: these columns are
  * server bookkeeping and must not make the word re-sync to every device.
+ *
+ * Duplicates: the KB does NOT dedup across requests (by design there: the same
+ * word from two books is two cards). A forward we give up on keeps running on
+ * the KB and still creates its card, so every retry after a timeout adds
+ * another; on 2026-11-17 one word became four cards that way. The timeout is
+ * therefore set above the KB's worst case rather than tight: its classifier
+ * answers in ~1s, and its slowest fallback (one Gemini attempt) is bounded at
+ * 60s. A forward that succeeds but fails to be recorded is re-sent after the
+ * lease and can also duplicate; that needs a DB failure in between, so it is
+ * accepted rather than solved with an idempotency key.
  */
 import { sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
@@ -28,8 +36,12 @@ import { onNewVocabSaved } from './kb-forward-signal.js';
 
 /** Words forwarded per run, so one run can't hold the job for long. */
 export const KB_FORWARD_BATCH = 20;
-/** No user is waiting on this request any more, so the KB gets longer than the old 10s. */
-export const KB_FORWARD_TIMEOUT_MS = 30_000;
+/**
+ * Above the KB's worst case (a 60s Gemini attempt plus overhead), because
+ * giving up early doesn't stop the KB: it still creates the card, and the
+ * retry would create a second one (see the header). No user is waiting.
+ */
+export const KB_FORWARD_TIMEOUT_MS = 90_000;
 /** A claim outlives one forward attempt by a margin, then the word is claimable again. */
 export const KB_FORWARD_LEASE_MS = KB_FORWARD_TIMEOUT_MS + 60_000;
 export const KB_FORWARD_SWEEP_MS = 60_000;
