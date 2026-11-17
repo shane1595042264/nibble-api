@@ -10,7 +10,7 @@ import { errorHandler } from './middleware/error-handler.js';
 import { authMiddleware } from './middleware/auth.js';
 import { adminMiddleware } from './middleware/admin.js';
 import { rateLimiter } from './middleware/rate-limit.js';
-import { aiAccessMiddleware } from './middleware/ai-access.js';
+import { startLivePrices } from './ai/live-prices.js';
 import { uploadBodyLimit, avatarBodyLimit } from './middleware/body-limit.js';
 import { healthRoutes } from './routes/health.js';
 import { bookRoutes } from './routes/books.js';
@@ -70,13 +70,15 @@ app.post('/billing/webhook', async (c) => {
 // Auth-protected routes
 app.use('/books/upload', authMiddleware, rateLimiter(15, 3600000), uploadBodyLimit);
 app.use('/books/*', authMiddleware, rateLimiter(120));
-app.use('/books/:id/suggest-structure', rateLimiter(60), aiAccessMiddleware);
+// AI runs on the reader's own key (bring your own key, 2026-11-17), so there is
+// no admin/whitelist gate any more: a reader without a key gets AI_KEY_REQUIRED.
+app.use('/books/:id/suggest-structure', rateLimiter(60));
 app.use('/chapters/*', authMiddleware, rateLimiter(120));
 app.use('/sections/*', authMiddleware, rateLimiter(120));
 app.use('/vocabulary/*', authMiddleware, rateLimiter(60));
 app.use('/settings/*', authMiddleware, rateLimiter(30));
 app.use('/sync/*', authMiddleware, rateLimiter(30));
-app.use('/ai/*', authMiddleware, rateLimiter(60), aiAccessMiddleware);
+app.use('/ai/*', authMiddleware, rateLimiter(60));
 // Auth covers every method so a future /processing route can't land unguarded,
 // but the rate limit is split by method. The GET surface is driven by the app's
 // own polling — status every 3s per processing book plus logs every 2s while the
@@ -116,6 +118,7 @@ app.route('/admin', adminRoutes);
 // Start background workers
 startWorker();
 startKnowledgeBaseForwarder();
+startLivePrices();
 setInterval(runCleanup, 60 * 60 * 1000);
 
 serve({ fetch: app.fetch, port: config.PORT }, () => {

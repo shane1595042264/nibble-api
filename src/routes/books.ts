@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { bookService } from '../services/book.service.js';
 import { AppError } from '../lib/errors.js';
 import { config } from '../lib/config.js';
-import { HAIKU_MODEL } from '../lib/ai-models.js';
 import { assertUuidPathParam } from '../lib/query-guards.js';
 import { parseTocSuggestions } from '../lib/toc-suggestions.js';
 
@@ -521,65 +520,40 @@ Rules:
 - Ensure endPage of one chapter/section is one less than startPage of the next
 - Return ONLY valid JSON, no markdown fences or commentary`;
 
-    const userContent: Array<any> = [];
-
-    // 2-shot examples
-    userContent.push({
-      type: 'text',
-      text: `Example 1 input: A TOC showing "Chapter 1: Intro ..... 1" and "Chapter 2: Methods ..... 15"
+    // 2-shot examples, then the TOC itself: page images go along as images,
+    // and the text fallback is inlined into the prompt.
+    const textPages = tocContent.filter((i): i is { type: 'text'; text: string } => i.type === 'text').map((i) => i.text);
+    const images = tocContent
+      .filter((i): i is { type: 'image'; data: string; mediaType: string } => i.type === 'image')
+      .map((i) => ({ mediaType: i.mediaType, data: i.data }));
+    const prompt = `Example 1 input: A TOC showing "Chapter 1: Intro ..... 1" and "Chapter 2: Methods ..... 15"
 Example 1 output: {"chapters":[{"title":"Chapter 1: Intro","startPage":1,"endPage":14},{"title":"Chapter 2: Methods","startPage":15,"endPage":30}]}
 
 Example 2 input: A TOC showing "Part I" with "1. Basics ... 3" and "2. Advanced ... 20" under it
 Example 2 output: {"chapters":[{"title":"Part I > 1. Basics","startPage":3,"endPage":19},{"title":"Part I > 2. Advanced","startPage":20,"endPage":40}]}
 
-Now parse the following TOC:`,
+Now parse the following TOC${images.length > 0 ? ' (the page images are attached in order)' : ''}:${textPages.length > 0 ? `\n\n${textPages.join('\n\n')}` : ''}`;
+
+    // Runs on the reader's own key (bring your own key, 2026-11-17); a reader
+    // without one gets AI_KEY_REQUIRED (409) from runAi.
+    // tocPages accepts up to 20 pages (suggestStructureSchema), and a dense nested
+    // TOC blows well past 4096 output tokens. Raising the cap alone would only trade
+    // a truncation for a timeout, hence both move together.
+    const { runAi } = await import('../ai/service.js');
+    const result = await runAi(user.id, 'toc', {
+      system: systemPrompt,
+      prompt,
+      images,
+      maxTokens: 16384,
+      json: true,
+      timeoutMs: 120_000,
+      signal: c.req.raw.signal,
     });
-
-    for (const item of tocContent) {
-      if (item.type === 'image') {
-        userContent.push({
-          type: 'image',
-          source: {
-            type: 'base64',
-            media_type: item.mediaType,
-            data: item.data,
-          },
-        });
-      } else {
-        userContent.push({ type: 'text', text: item.text });
-      }
-    }
-
-    const { default: Anthropic } = await import('@anthropic-ai/sdk');
-    // tocPages accepts up to 20 pages (suggestStructureSchema), and a dense nested TOC
-    // blows well past 4096 output tokens. Raising the cap alone would only trade a
-    // truncation for a timeout — Haiku emits on the order of 100 tok/s, so 30s never
-    // covered 4096 tokens either — hence both move together.
-    const client = new Anthropic({ timeout: 120_000 });
-    let response;
-    try {
-      response = await client.messages.create({
-        model: HAIKU_MODEL,
-        max_tokens: 16384,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userContent }],
-      });
-    } catch (err) {
-      // Timeout / 429 / overloaded are all the AI leg failing, not the caller's request.
-      // Without this they reach the generic branch of error-handler.ts as a 500.
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new AppError('AI_ERROR', `Could not reach the AI to read this table of contents: ${detail}`, 502);
-    }
-
-    const textBlock = response.content.find((b: any) => b.type === 'text');
-    if (!textBlock || textBlock.type !== 'text') {
-      throw new AppError('AI_ERROR', 'No text response from Claude', 502);
-    }
 
     // Parse + shape-check the model's reply. Every failure in here classifies as
     // AI_ERROR/502 rather than leaking a SyntaxError (-> 400 'Invalid JSON body') or a
     // TypeError (-> 500) that blames the caller for the model's output. See KAN-313.
-    const suggestions = parseTocSuggestions(textBlock.text, response.stop_reason);
+    const suggestions = parseTocSuggestions(result.text, result.truncated ? 'max_tokens' : null);
 
     // Flatten nested structure using > prefix for chapter accordion display
     const flatChapters: Array<{ title: string; startPage: number; endPage: number }> = [];

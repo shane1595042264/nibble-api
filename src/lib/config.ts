@@ -10,7 +10,6 @@ const envSchema = z.object({
   R2_ACCESS_KEY_ID: z.string().default(''),
   R2_SECRET_ACCESS_KEY: z.string().default(''),
   R2_BUCKET_NAME: z.string().default('nibble-pdfs'),
-  ANTHROPIC_API_KEY: z.string().default(''),
   MATHPIX_APP_ID: z.string().default(''),
   MATHPIX_APP_KEY: z.string().default(''),
   STRIPE_SECRET_KEY: z.string().default(''),

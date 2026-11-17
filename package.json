@@ -26,7 +26,6 @@
   },
   "homepage": "https://github.com/shane1595042264/nibble-api#readme",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
     "@aws-sdk/client-s3": "^3.1006.0",
     "@aws-sdk/s3-request-presigner": "^3.1006.0",
     "@hono/node-server": "^1.19.11",

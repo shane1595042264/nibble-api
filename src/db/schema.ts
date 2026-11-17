@@ -19,6 +19,60 @@ export const users = pgTable('users', {
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
 });
 
+// ============ AI: BRING YOUR OWN KEY (2026-11-17) ============
+// Every model call Nibbler makes runs on the reader's own provider key, sealed
+// with AES-256-GCM (src/ai/crypto.ts) and kept with their account so it works
+// on every device. Ported from shaneBackend's modules/ai (SHAN-596).
+
+/** One key per provider per user: adding a second Gemini key replaces the first. */
+export const userAiKeys = pgTable('user_ai_keys', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  /** 'gemini' | 'openai' | 'anthropic' | 'xai', detected from the key's format. */
+  provider: text('provider').notNull(),
+  /** base64(iv | tag | ciphertext). Never leaves the server. */
+  keySealed: text('key_sealed').notNull(),
+  /** Last four characters, to tell keys apart in Settings. */
+  keyHint: text('key_hint').notNull(),
+  /** Text models the key listed at its last check, cheapest first. */
+  models: jsonb('models').notNull().default([]),
+  /** The cheapest model that actually answered the check. */
+  defaultModel: text('default_model').notNull(),
+  /** Chosen in Settings; null = the cheapest that works. */
+  preferredModel: text('preferred_model'),
+  /** 'ok' | 'failing': flipped when the provider refuses the key mid-use. */
+  status: text('status').notNull().default('ok'),
+  lastError: text('last_error'),
+  lastCheckedAt: timestamp('last_checked_at').notNull().defaultNow(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('idx_user_ai_keys_user_provider').on(table.userId, table.provider),
+]);
+
+export const userAiSettings = pgTable('user_ai_settings', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  /** Null: whichever working key was added first. */
+  preferredProvider: text('preferred_provider'),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+});
+
+/** Every model call made with a reader's key: the usage and cost page reads these. */
+export const aiUsageEvents = pgTable('ai_usage_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  model: text('model').notNull(),
+  /** What the call was for: 'translate-word', 'ocr', 'toc', 'validate', ... (src/ai/service.ts AiFeature). */
+  feature: text('feature').notNull(),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  /** Estimated cost in millionths of a dollar at the price of that moment; null when unknown. */
+  costMicroUsd: integer('cost_micro_usd'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => [
+  index('idx_ai_usage_events_user_created').on(table.userId, table.createdAt),
+]);
+
 // ============ OAUTH ACCOUNTS (for NextAuth account linking) ============
 export const oauthAccounts = pgTable('oauth_accounts', {
   id: uuid('id').primaryKey().defaultRandom(),

@@ -438,50 +438,48 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
           `Found ${emptySections.length} sections with insufficient text — running OCR...`,
         );
 
-        for (let i = 0; i < emptySections.length; i++) {
+        // OCR runs on the job owner's own AI key (bring your own key,
+        // 2026-11-17). Without a key that can read images the stage is skipped
+        // with one clear log line instead of one failure per page.
+        const ocrOwner = (await processingLogRepository.getJob(jobId))?.userId;
+        const { runAi } = await import('../ai/service.js');
+        let ocrBlocked = !ocrOwner;
+        if (!ocrOwner) {
+          await processingLogRepository.append(jobId, 'ocr', 'Skipping OCR: this job has no owner to run AI for', 'warn');
+        }
+
+        for (let i = 0; i < emptySections.length && !ocrBlocked; i++) {
           const section = emptySections[i];
           const startPage = section.startPage ?? 1;
           const endPage = section.endPage ?? startPage;
 
           let ocrText = '';
           for (let page = startPage; page <= endPage; page++) {
-            // One Anthropic call per page and the stage's progress tick only
-            // fires once the whole section is done — a long section would keep
-            // billing well past the cancel without this checkpoint.
+            // One model call per page and the stage's progress tick only fires
+            // once the whole section is done — a long section would keep
+            // billing the reader's key well past the cancel without this checkpoint.
             await assertJobActive(jobId);
             try {
               const imageBuffer = await pdfService.renderPageToImage(pdfBuffer, page, 2.0);
-              const base64Image = imageBuffer.toString('base64');
-
-              const { default: Anthropic } = await import('@anthropic-ai/sdk');
-              const client = new Anthropic({ timeout: 30_000 });
-              const response = await client.messages.create({
-                model: 'claude-haiku-4-5-20251001',
-                max_tokens: 4096,
-                messages: [{
-                  role: 'user',
-                  content: [
-                    {
-                      type: 'image',
-                      source: {
-                        type: 'base64',
-                        media_type: 'image/png',
-                        data: base64Image,
-                      },
-                    },
-                    {
-                      type: 'text',
-                      text: 'Extract all readable text from this page image. Return only the text content, preserving paragraph structure. Do not add any commentary.',
-                    },
-                  ],
-                }],
+              const result = await runAi(ocrOwner!, 'processing-ocr', {
+                prompt: 'Extract all readable text from this page image. Return only the text content, preserving paragraph structure. Do not add any commentary.',
+                images: [{ mediaType: 'image/png', data: imageBuffer.toString('base64') }],
+                maxTokens: 4096,
+                timeoutMs: 90_000,
               });
-
-              const textBlock = response.content.find(b => b.type === 'text');
-              if (textBlock && textBlock.type === 'text') {
-                ocrText += (ocrText ? '\n\n' : '') + textBlock.text;
+              if (result.text.trim()) {
+                ocrText += (ocrText ? '\n\n' : '') + result.text;
               }
             } catch (err: any) {
+              if (err?.code === 'AI_KEY_REQUIRED' || err?.code === 'AI_KEY_NO_VISION' || err?.code === 'AI_KEY_REJECTED') {
+                await processingLogRepository.append(
+                  jobId, 'ocr',
+                  `Skipping OCR: ${err.message} Then use Retry to OCR the ${emptySections.length - i} remaining sections.`,
+                  'warn',
+                );
+                ocrBlocked = true;
+                break;
+              }
               await processingLogRepository.append(
                 jobId, 'ocr',
                 `Warning: OCR failed for page ${page}: ${err.message}`,

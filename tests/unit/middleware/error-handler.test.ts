@@ -1,13 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ZodError, z } from 'zod';
 import { errorHandler } from '../../../src/middleware/error-handler.js';
-import {
-  APIConnectionTimeoutError,
-  APIUserAbortError,
-  AuthenticationError,
-  InternalServerError,
-  RateLimitError,
-} from '@anthropic-ai/sdk';
 import { AppError, Errors } from '../../../src/lib/errors.js';
 
 // Minimal stub of the Hono context: only c.json(body, status) is used.
@@ -66,49 +59,27 @@ describe('errorHandler', () => {
     spy.mockRestore();
   });
 
-  // KAN-366: Anthropic SDK errors used to fall through to the catch-all, so a
-  // routine 429/529 reached the reader as INTERNAL_ERROR 500 raw JSON.
-  describe('Anthropic SDK errors (KAN-366)', () => {
-    const headers = new Headers();
-    const transient: Array<[string, Error]> = [
-      ['RateLimitError 429', new RateLimitError(429, undefined, 'rate limited', headers)],
-      ['overloaded 529', new InternalServerError(529, undefined, 'overloaded', headers)],
-      ['InternalServerError 500', new InternalServerError(500, undefined, 'boom', headers)],
-      ['APIConnectionTimeoutError', new APIConnectionTimeoutError()],
-    ];
-
-    it.each(transient)('maps %s to 503 AI_UNAVAILABLE and only warns', (_label, err) => {
+  // KAN-366 / BYOK (2026-11-17): provider failures reach the handler as AI_*
+  // AppErrors from src/ai/service.ts, and a reader's abort as a plain AbortError.
+  describe('AI calls', () => {
+    it('answers an uncaught client abort with 499 and logs nothing', () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const res: any = errorHandler(err, makeCtx());
-      expect(res.status).toBe(503);
-      expect(res.body.error.code).toBe('AI_UNAVAILABLE');
-      expect(res.body.error.message).toMatch(/try again/);
-      expect(errSpy).not.toHaveBeenCalled();
-      expect(warnSpy).toHaveBeenCalled();
-      errSpy.mockRestore();
-      warnSpy.mockRestore();
-    });
-
-    it('maps a non-transient Anthropic error (401) to 502 AI_ERROR and logs it as an error', () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const res: any = errorHandler(new AuthenticationError(401, undefined, 'bad key', headers), makeCtx());
-      expect(res.status).toBe(502);
-      expect(res.body.error.code).toBe('AI_ERROR');
-      expect(errSpy).toHaveBeenCalled();
-      errSpy.mockRestore();
-    });
-
-    it('answers an uncaught APIUserAbortError with 499, not 500', () => {
-      const res: any = errorHandler(new APIUserAbortError(), makeCtx());
+      const abort = new DOMException('The operation was aborted.', 'AbortError');
+      const res: any = errorHandler(abort as unknown as Error, makeCtx());
       expect(res).toBeInstanceOf(Response);
       expect(res.status).toBe(499);
+      expect(errSpy).not.toHaveBeenCalled();
+      errSpy.mockRestore();
     });
 
-    it("passes 'Anthropic not configured' through as 503 AI_UNAVAILABLE", () => {
-      const res: any = errorHandler(Errors.aiUnavailable('Anthropic not configured'), makeCtx());
-      expect(res.status).toBe(503);
-      expect(res.body.error.code).toBe('AI_UNAVAILABLE');
+    it.each([
+      [Errors.aiUnavailable('Gemini did not answer in time. Try again.'), 503, 'AI_UNAVAILABLE'],
+      [new AppError('AI_KEY_REQUIRED', 'Add your own AI key in Settings > AI to use this.', 409), 409, 'AI_KEY_REQUIRED'],
+      [new AppError('AI_RATE_LIMITED', 'OpenAI is rate-limiting your key.', 429), 429, 'AI_RATE_LIMITED'],
+    ])('passes %s through with its own status and copy', (err, status, code) => {
+      const res: any = errorHandler(err, makeCtx());
+      expect(res.status).toBe(status);
+      expect(res.body.error).toEqual({ code, message: err.message, status });
     });
   });
 });

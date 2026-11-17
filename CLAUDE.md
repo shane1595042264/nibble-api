@@ -28,6 +28,10 @@ Vocab is no longer stored in this app's `vocabulary` PG table as the authoritati
 
 **Every new vocab must reach the knowledge base.** Don't add a vocab insert that sets `kb_forwarded_at` itself, don't move the forward back inline into `POST /api/sync`, and don't remove `startKnowledgeBaseForwarder()` from `src/index.ts`.
 
+### AI runs on the reader's own key (BYOK, since 2026-11-17)
+
+There is no server AI key. Readers paste an Anthropic, OpenAI, Gemini or xAI key in WordByWord's Settings > AI; `src/ai/` detects the provider, proves the key, seals it (AES-256-GCM, derived from `JWT_SECRET`) into `user_ai_keys`, and meters every call into `ai_usage_events`. Any new AI call goes through `runAi(userId, feature, input)` in `src/ai/service.ts`: never call a provider directly, never use a server key, never return or log a raw key, and add the new `feature` name to `AiFeature` so usage stays attributable. A reader without a usable key gets `AI_KEY_REQUIRED` (409), whose copy the frontend shows as-is. Rotating `JWT_SECRET` invalidates every stored key. Details: northstar Section 0, 2026-11-17.
+
 ### Env vars that must exist on Railway
 
 - `KNOWLEDGE_BASE_PAT` — PAT minted from the personal-website's `/settings/tokens` UI with `knowledge:write` scope. Without it every new vocab forward 503s.
@@ -42,7 +46,7 @@ Vocab is no longer stored in this app's `vocabulary` PG table as the authoritati
 | DB | PostgreSQL + Drizzle ORM |
 | Storage | Cloudflare R2 (PDF blobs) |
 | Auth | JWT (signed with `JWT_SECRET`, minted by WordByWord's `/api/auth/token`) |
-| AI | Anthropic SDK (Claude) + Mathpix |
+| AI | The reader's own key (Anthropic, OpenAI, Gemini or xAI over plain `fetch`, `src/ai/`) + Mathpix |
 | Hosting | Railway (project: `nibble-backend`, service: `nibble-api`, prod env id: `05b9dc29-...`) |
 | Tests | Vitest (`tests/unit/`, `tests/integration/`) |
 
