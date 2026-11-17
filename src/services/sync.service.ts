@@ -167,6 +167,21 @@ export function resolveConflict(
   return coerceDates(merged);
 }
 
+/**
+ * True when writing a resolveConflict() merge would change the stored section.
+ * scroll_progress is a `real` (float4) column, so compare at that precision: the
+ * client's double never equals the float the server hands back.
+ */
+export function progressMergeChanges(
+  merge: Record<string, unknown>,
+  server: Record<string, unknown>,
+): boolean {
+  const time = (v: unknown) => (v == null ? null : new Date(v as string | Date).getTime());
+  if ('isRead' in merge && Boolean(merge.isRead) !== Boolean(server.isRead)) return true;
+  if ('readAt' in merge && time(merge.readAt) !== time(server.readAt)) return true;
+  return Math.fround(Number(merge.scrollProgress)) !== Math.fround(Number(server.scrollProgress ?? 0));
+}
+
 // The returned syncedAt is backed off by this much: a concurrent write stamps
 // updatedAt (JS clock, or Postgres now() for inserts) before its commit is
 // visible to our reads, so a row stamped just before the watermark can still
@@ -411,8 +426,11 @@ export const syncService = {
                 ...progressMerge,
               }) as any);
             }
-          } else {
-            // Server wins on timestamp, but still apply reading-progress merge
+          } else if (progressMergeChanges(progressMerge, server)) {
+            // Server wins on timestamp, but still apply reading-progress merge.
+            // Skipped when the merge changes nothing: the write bumps updated_at,
+            // the pull hands the row back, and the client re-pushes it at that new
+            // stamp on every later sync, forever (KAN-406).
             await sectionRepository.update(clientSection.id, progressMerge as any);
           }
         }
