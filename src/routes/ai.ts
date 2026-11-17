@@ -225,3 +225,25 @@ aiRoutes.post('/explain-image', async (c) => {
   const result = await runOr499(() => aiService.explainImage(ctxOf(c), b.imageUrl, b.surroundingContext));
   return result === null ? new Response(null, { status: 499 }) : c.json(result);
 });
+
+// ─── Shortcut search (the ? dialog) ─────────────────────────────
+
+const searchShortcutsSchema = z.object({
+  query: z.string().trim().min(1).max(200),
+  shortcuts: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(64),
+        label: z.string().max(100),
+        description: z.string().max(300),
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+
+aiRoutes.post('/search-shortcuts', async (c) => {
+  const b = parseOr400(searchShortcutsSchema, await c.req.json());
+  const result = await runOr499(() => aiService.searchShortcuts(ctxOf(c), b.query, b.shortcuts));
+  return result === null ? new Response(null, { status: 499 }) : c.json(result);
+});

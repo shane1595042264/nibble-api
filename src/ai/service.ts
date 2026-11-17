@@ -18,6 +18,7 @@ export type AiFeature =
   | 'explain-translation'
   | 'explain-content'
   | 'explain-image'
+  | 'search-shortcuts'
   | 'ocr'
   | 'toc'
   | 'split-sections'

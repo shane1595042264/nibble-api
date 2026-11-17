@@ -120,3 +120,28 @@ describe('key management', () => {
     expect(repoMock.usageSummary).toHaveBeenCalledWith(USER_ID, 7);
   });
 });
+
+describe('shortcut search', () => {
+  const shortcuts = [
+    { id: 'normal:s', label: 'Sentence mode', description: 'Switch to sentence mode' },
+    { id: 'view-pdf', label: 'PDF View', description: 'Switch to PDF view mode' },
+  ];
+
+  it('returns only ids from the catalog the browser sent, deduped', async () => {
+    serviceMock.runAi.mockResolvedValue({ text: 'Sure: ["normal:s","made-up","normal:s",7,"view-pdf"]', truncated: false });
+    const res = await post('/ai/search-shortcuts', { query: 'how do I switch modes', shortcuts });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ids: ['normal:s', 'view-pdf'] });
+    expect(serviceMock.runAi).toHaveBeenCalledWith(USER_ID, 'search-shortcuts', expect.objectContaining({ json: true }));
+  });
+
+  it.each([
+    ['a blank query', { query: '   ', shortcuts }],
+    ['an empty catalog', { query: 'modes', shortcuts: [] }],
+    ['an oversized catalog', { query: 'modes', shortcuts: Array.from({ length: 101 }, (_, i) => ({ id: `s${i}`, label: 'x', description: 'x' })) }],
+  ])('rejects %s with 400 before spending anything', async (_name, body) => {
+    const res = await post('/ai/search-shortcuts', body);
+    expect(res.status).toBe(400);
+    expect(serviceMock.runAi).not.toHaveBeenCalled();
+  });
+});

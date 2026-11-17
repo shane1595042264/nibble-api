@@ -176,6 +176,32 @@ Give a clear explanation in English. If it's a table, explain what the data repr
   },
 
   /**
+   * Find the keyboard shortcuts that answer a question the reader's words did
+   * not match ("how do I switch modes?"). The browser sends its own catalog,
+   * since the keymap lives there; only ids from that catalog come back.
+   */
+  async searchShortcuts(
+    ctx: AiCallContext,
+    query: string,
+    shortcuts: Array<{ id: string; label: string; description: string }>,
+  ): Promise<{ ids: string[] }> {
+    const catalog = shortcuts.map((s) => `${s.id} | ${s.label} | ${s.description}`).join('\n');
+    const prompt = `A reader of an e-book app asked how to do something with the keyboard. Pick the shortcuts below that answer the question, most relevant first, at most 5. If none fits, pick none.
+
+Question: "${query}"
+
+Shortcuts (id | name | what it does):
+${catalog}
+
+Respond with ONLY a JSON array of the chosen ids, e.g. ["id-one","id-two"], or [] if none fits.`;
+    const raw = await text(ctx, 'search-shortcuts', { prompt, maxTokens: 200, json: true });
+    const picked = firstJson<unknown[]>(raw, 'array', 'shortcut search');
+    const known = new Set(shortcuts.map((s) => s.id));
+    const ids = [...new Set(picked.filter((id): id is string => typeof id === 'string' && known.has(id)))];
+    return { ids: ids.slice(0, 5) };
+  },
+
+  /**
    * Split a run of pages into the smallest sections a reader could study on
    * their own. Moved here from the browser (WordByWord ai-service.ts), which
    * used to call Anthropic directly with a key kept in localStorage.
