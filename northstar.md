@@ -8,6 +8,26 @@
 
 The plan below was written 2026-03-10 as the initial build-out. Most of it shipped. This section overrides anything below it when they conflict. Add a dated bullet here whenever the user's intent changes — do NOT silently delete the older sections; just note they're superseded.
 
+### 2026-11-17 — New vocab reaches the knowledge base through an outbox, not inside POST /api/sync
+
+The 2026-05-16 entry below says the forward fires inside the sync request, BEFORE the local insert, with failures returned in `failedEntities.vocabulary`. That is **superseded**. What happened: a word the user's browser pushed hit `KNOWLEDGE_BASE_TIMEOUT` three times in a row (Railway logs, 2026-11-17 20:52–20:54 UTC, `Knowledge base did not respond within 10000ms`; the KB runs an AI classifier per note and was slow), so the client showed "Sync failed — 1 item will retry" until the fourth push happened to get a 3.6s answer. The retry also depended on a browser tab staying open.
+
+Now:
+- `sync.service.ts` saves a new word immediately with `kb_forwarded_at` NULL and calls `notifyNewVocabSaved()` (`src/jobs/kb-forward-signal.ts`). A slow or down KB can't fail a sync any more.
+- `src/jobs/kb-forward.ts` (started in `src/index.ts`) forwards owed words: woken ~250ms after a sync saves any, plus a sweep every minute and one at startup. Each word is claimed with a 90s lease under `FOR UPDATE SKIP LOCKED` (safe with two containers during a deploy), forwarded with a 30s timeout, then marked forwarded, or failed with `kb_forward_attempts`, `kb_last_error` and an exponential backoff (30s doubling, capped at 6h, retried forever). Re-sending after a lost acknowledgement is safe because the KB's dedup (2xx, no entries) counts as delivered (KAN-230).
+- Migration `0015_kb_forward_outbox` adds the four `kb_*` columns plus a partial index on owed rows, and marks every pre-existing row forwarded (they were only ever inserted after a successful forward), so nothing is re-sent on deploy. The columns are server-only: stripped from sync in both directions and written only with raw SQL so `updated_at` (and therefore every device's sync) never moves.
+- `failedEntities.vocabulary` still exists and still drives the WordByWord retry, but now only for a real database error on the word. The response shape is unchanged.
+
+**Don't undo this without explicit user consent:** don't move the KB call back into the request path, don't let clients read or write the `kb_*` columns, and don't add a vocab insert that skips the outbox.
+
+### 2026-11-17 — No stored .nib: `nib_cache` and `uploadNib` stay unused
+
+Chunk 9's "Step 6: .nib Assembly" (upload the .nib JSON to R2, record it in `nib_cache`) and Task 5.1's "include nib_cache as server-to-client data" are **superseded**. The 2026-03-14 processing redesign already stopped populating `nib_cache`; on 2026-11-17 the user decided it stays that way. The WordByWord reader rebuilds the NibDocument from the open section every time (~5 ms per 12-page section), and a whole-book .nib JSON is about the size of the PDF (24–36 MB measured) and goes stale on every parser fix or chapter reorganize. What the backend *does* persist is the expensive part: `sections.extracted_text` and `sections.rich_content` (OCR / Mathpix / AI output). Full reasoning and numbers: WordByWord `NorthStar.md` Section 0, same date.
+
+- `storage.uploadNib()` (`src/services/storage.service.ts`) has no callers and the `nib_cache` table is empty. They're dead code, not a pending feature; removing them (plus the `nibs/` key handling in `src/jobs/cleanup.ts` and its tests) is safe cleanup whenever someone wants it.
+- **Never accept a client-uploaded .nib.** `nib_cache` is keyed by `file_hash`, so it would be shared across every user of that book.
+- If a server feature ever needs word-level structure (e.g. search across a user's books), build it here from the PDF already in R2 and key it by a parser version. For search, section-level hits from the stored text are enough: the reader's read-time .nib finds the exact word when the hit is opened.
+
 ### 2026-09-11 — Section `isRead` conflict resolution is no longer monotonic (KAN-299)
 
 Line 1272 below states the original rule: *"If server has `isRead=true` and client has `isRead=false`, server wins regardless of timestamp."* That rule is **superseded** — it made the "Mark as Unread" toolbar action impossible to persist for any signed-in user.
@@ -42,7 +62,7 @@ Now a 2xx with empty entries returns a best-effort entry synthesized from the in
 The nibble-api `vocabulary` table is no longer the source of truth for vocab. The personal-website knowledge base at https://shanebackend-production.up.railway.app/api/knowledge/notes is.
 
 - New service: `src/services/knowledge-base.service.ts` — composes a classifier-friendly text + nibbler-tagged source object and POSTs with a Bearer PAT.
-- The forward fires from `sync.service.ts` inside the `if (!server)` branch for vocabulary (the "new vocab" case), BEFORE the local insert. On failure → `failedEntities.vocabulary` so the WordByWord sync layer retries.
+- The forward fires from `sync.service.ts` inside the `if (!server)` branch for vocabulary (the "new vocab" case), BEFORE the local insert. On failure → `failedEntities.vocabulary` so the WordByWord sync layer retries. *(superseded 2026-11-17 — see above: the word is saved first and `src/jobs/kb-forward.ts` forwards it in the background.)*
 - `POST /api/vocabulary` route still exists and still inserts to the local PG table — but the WordByWord frontend never calls it directly anymore. The click flow goes through `POST /api/sync`. The route is effectively dead code, kept for backward compatibility.
 - New env vars: `KNOWLEDGE_BASE_URL` (defaults to prod), `KNOWLEDGE_BASE_PAT`. PAT must be set on Railway or every new vocab forward will 503.
 - The PAT is named "nibble-api forwarder" with `knowledge:write` scope only, visible/revocable at https://shanejli.com/settings/tokens.
@@ -52,7 +72,7 @@ The nibble-api `vocabulary` table is no longer the source of truth for vocab. Th
 
 **Don't undo this without explicit user consent:**
 - Don't remove the forward call from `sync.service.ts`. Every new vocab MUST reach the knowledge base.
-- Don't re-enable a code path that writes vocab locally without also forwarding. If you add a new vocab write path, it goes through `forwardVocabToKnowledgeBase` too.
+- Don't re-enable a code path that writes vocab locally without also forwarding. If you add a new vocab write path, it goes through `forwardVocabToKnowledgeBase` too. *(2026-11-17: "forwarding" now means leaving `kb_forwarded_at` NULL so the kb-forward outbox picks the row up.)*
 - Don't change the response shape of `POST /api/sync` for vocabulary in ways that break the WordByWord dirty-flag/retry machinery. `failedEntities.vocabulary` is the retry signal.
 
 ---

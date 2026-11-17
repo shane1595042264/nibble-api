@@ -182,10 +182,11 @@ describe('POST /sync bounds pre-filter — round-trips the server’s own nullab
 
 describe('POST /sync bounds pre-filter — vocabulary (KAN-320)', () => {
   it('rejects an over-cap word and explanation before the payload reaches the sync service', async () => {
-    // The knowledge-base fan-out lives inside syncService.sync and is
-    // append-only (no DELETE, no PATCH), so an entry that never reaches the
-    // service can never reach the KB. Asserting the id is absent from the
-    // service call IS the proof that the irreversible POST was skipped.
+    // The knowledge base is append-only (no DELETE, no PATCH). A word reaches
+    // it only after syncService.sync saves it (the kb-forward job forwards
+    // saved rows), so an entry that never reaches the service can never reach
+    // the KB. Asserting the id is absent from the service call IS the proof
+    // that the irreversible POST can't happen.
     const body = await push({
       vocabulary: [vocab({ word: 'x'.repeat(201), explanation: 'y'.repeat(5001) })],
     });

@@ -26,6 +26,7 @@ import { processingRoutes } from './routes/processing.js';
 import { userRoutes } from './routes/users.js';
 import { runCleanup } from './jobs/cleanup.js';
 import { startWorker } from './jobs/process-pdf.js';
+import { startKnowledgeBaseForwarder } from './jobs/kb-forward.js';
 
 // Run database migrations on startup
 console.log('Running database migrations...');
@@ -114,6 +115,7 @@ app.route('/admin', adminRoutes);
 
 // Start background workers
 startWorker();
+startKnowledgeBaseForwarder();
 setInterval(runCleanup, 60 * 60 * 1000);
 
 serve({ fetch: app.fetch, port: config.PORT }, () => {

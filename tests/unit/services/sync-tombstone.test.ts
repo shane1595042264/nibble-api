@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { db, forward, loadSyncService, resetDb } from './sync-harness.js';
+import { db, kbWake, loadSyncService, resetDb } from './sync-harness.js';
 
 // A stale client still holding rows the server has soft-deleted (e.g. the old
 // layout after PUT /books/:id/structure) pushes them back. The sync lookup used
@@ -96,8 +96,9 @@ describe('syncService.sync — pushed ids that are soft-deleted on the server', 
       vocabulary: [{ id: DELETED_VOCAB, word: 'gone', updatedAt: '2026-09-16T00:00:00.000Z' }] as any,
     });
 
-    expect(forward).not.toHaveBeenCalled();
+    // Not re-created means never owed to the KB again, so the forwarder isn't woken.
     expect(db.vocab.create).not.toHaveBeenCalled();
+    expect(kbWake).not.toHaveBeenCalled();
     expect(res.failedEntities.vocabulary).toEqual([]);
     expect(res.serverChanges.vocabulary.filter((v) => v.id === DELETED_VOCAB && v.deletedAt)).toHaveLength(1);
   });

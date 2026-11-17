@@ -8,9 +8,10 @@ import { config } from '../lib/config.js';
 import { AppError } from '../lib/errors.js';
 
 /**
- * Short bound for the outbound KB forward. This runs on the INTERACTIVE sync
- * path (POST /api/sync, awaited sequentially per new word), so it must fail
- * fast — not block the whole request behind a hung upstream. Mirrors the
+ * Default bound for the outbound KB forward. Since 2026-11-17 the only caller
+ * is the background outbox (src/jobs/kb-forward.ts), which passes its own,
+ * longer KB_FORWARD_TIMEOUT_MS; this default used to guard the interactive
+ * POST /api/sync path, where a slow KB failed the word. Mirrors the
  * AbortSignal.timeout convention introduced for Mathpix in mathpix.service.ts.
  */
 const KNOWLEDGE_BASE_TIMEOUT_MS = 10_000;
@@ -141,16 +142,14 @@ export async function forwardVocabToKnowledgeBase(
         Authorization: `Bearer ${config.KNOWLEDGE_BASE_PAT}`,
       },
       body: JSON.stringify(body),
-      // Without this, a hung KB never throws and never reaches the caller's
-      // catch (sync.service.ts:379) — it just stalls the whole POST /api/sync
-      // request indefinitely. A timeout turns the hang into a thrown error so
-      // the existing failedEntities retry path fires.
+      // Without this, a hung KB never throws and the outbox run that awaits it
+      // never finishes. A timeout turns the hang into a thrown error, which the
+      // outbox records and retries with backoff.
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     if (isAbortTimeout(err)) {
-      // 502 (treated like an upstream 5xx) so the caller's catch pushes this
-      // word to failedEntities.vocabulary and the client retries next sync.
+      // 502 (treated like an upstream 5xx); the outbox retries it with backoff.
       throw new AppError(
         'KNOWLEDGE_BASE_TIMEOUT',
         `Knowledge base did not respond within ${timeoutMs}ms`,
@@ -185,11 +184,12 @@ export async function forwardVocabToKnowledgeBase(
     // not failure. Throwing here previously pushed the word onto
     // failedEntities.vocabulary, which made the WordByWord client bump
     // updatedAt and re-forward the same word on every sync forever (the
-    // "sync partial — N items will retry" loop). Return a best-effort entry
-    // synthesized from the input so the caller proceeds to the local insert and
-    // clears the dirty flag. The synthetic id is never used by the sync path
-    // (the local PG row keeps the client's own id) and the KB has no GET to
-    // recover the real one.
+    // "sync partial — N items will retry" loop, KAN-230). Return a best-effort
+    // entry synthesized from the input so the caller treats it as delivered:
+    // the kb-forward outbox marks the word forwarded (it also relies on this
+    // when a word is re-sent after a lost acknowledgement). The synthetic id is
+    // never used (the PG row keeps the client's own id) and the KB has no GET
+    // to recover the real one.
     return {
       id: '',
       word: input.word,

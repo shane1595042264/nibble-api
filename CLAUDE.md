@@ -21,11 +21,12 @@ This is the rule that prevents agent regressions:
 
 Vocab is no longer stored in this app's `vocabulary` PG table as the authoritative copy. It forwards to https://shanebackend-production.up.railway.app/api/knowledge/notes.
 
-- **Where the forward fires:** `src/services/sync.service.ts`, inside the `if (!server)` branch of the vocabulary loop (the "new vocab" case). It runs BEFORE the local insert. On forward failure → push to `failedEntities.vocabulary` so the WordByWord sync layer re-bumps `updatedAt` and retries on the next sync.
-- **The forwarder primitive:** `src/services/knowledge-base.service.ts`. It composes a classifier-friendly text + nibbler-tagged source object and POSTs with a Bearer PAT (`KNOWLEDGE_BASE_PAT` env var).
-- **`POST /api/vocabulary`** still exists and still writes to the local PG table — but the WordByWord click flow never calls it. It's effectively dead code. Don't rely on its behavior; if you change it, also change the sync path.
+- **How a new word gets there (since 2026-11-17, an outbox):** `src/services/sync.service.ts` saves the new word into `vocabulary` with `kb_forwarded_at` NULL (= owed to the KB) and wakes `src/jobs/kb-forward.ts`. That job claims owed words (lease + `FOR UPDATE SKIP LOCKED`), forwards each with a 30s timeout, marks it `kb_forwarded_at = now()`, or records the error and retries with backoff (30s doubling, capped at 6h, forever). It also sweeps every minute and on startup. A slow or down KB no longer fails anything in `POST /api/sync`; `failedEntities.vocabulary` now only means a database error on the word. Before this, the forward ran inline BEFORE the insert with a 10s timeout, and a slow KB showed "Sync failed" on the client (northstar Section 0, 2026-11-17).
+- **The outbox columns (`kb_forwarded_at`, `kb_forward_attempts`, `kb_next_attempt_at`, `kb_last_error`) are server-only.** `sync.service.ts` strips them from rows it sends and rows it receives (`withoutKbOutboxFields`), and they're only written with raw SQL so `updated_at` never moves. Find stuck words with `SELECT id, word, kb_forward_attempts, kb_last_error FROM vocabulary WHERE kb_forwarded_at IS NULL AND deleted_at IS NULL`.
+- **The forwarder primitive:** `src/services/knowledge-base.service.ts`. It composes a classifier-friendly text + nibbler-tagged source object and POSTs with a Bearer PAT (`KNOWLEDGE_BASE_PAT` env var). A 2xx with no entries is a dedup and counts as delivered.
+- **`POST /api/vocabulary`** still exists and still writes to the local PG table — but the WordByWord click flow never calls it. It's effectively dead code. Rows it creates are owed to the KB like any other, so the outbox forwards them too.
 
-**Don't remove the forward call from `sync.service.ts`.** Every new vocab must reach the knowledge base.
+**Every new vocab must reach the knowledge base.** Don't add a vocab insert that sets `kb_forwarded_at` itself, don't move the forward back inline into `POST /api/sync`, and don't remove `startKnowledgeBaseForwarder()` from `src/index.ts`.
 
 ### Env vars that must exist on Railway
 
@@ -59,4 +60,4 @@ Every authenticated route uses the auth middleware in `src/middleware/auth.ts`. 
 
 `POST /api/sync` accepts a `{ lastSyncedAt, changes: { books, chapters, sections, vocabulary, settings, exerciseProgress } }` payload and returns `{ serverChanges, failedEntities, syncedAt, pullCursor }`. Chapters and sections are paged by id (MAX_LIST_ROWS per page): a non-null `pullCursor` means more rows remain, and the client re-posts with the same `lastSyncedAt`, empty `changes` and that `pullCursor` until it comes back null, keeping the FIRST page's `syncedAt` as its watermark (KAN-397). The WordByWord frontend uses `failedEntities.*` to know which entities to retry. If you ever introduce a hard failure for a single entity, push its id to the right `failedEntities` array rather than throwing — otherwise the client's dirty-flag bookkeeping gets stuck.
 
-The vocab path inside `sync.service.ts` is the one most likely to surprise you: it forwards to the personal-website BEFORE inserting locally, so the local insert is skipped on forward failure. Read Section 0 of `northstar.md` for the why.
+The vocab path inside `sync.service.ts` is the one most likely to surprise you: a new word is saved and then forwarded to the personal-website knowledge base by a background job (`src/jobs/kb-forward.ts`), not inside the request. Read Section 0 of `northstar.md` (2026-11-17 and 2026-05-16) for the why.

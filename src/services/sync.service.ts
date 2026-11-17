@@ -4,7 +4,7 @@ import { sectionRepository } from '../repositories/section.repository.js';
 import { vocabularyRepository } from '../repositories/vocabulary.repository.js';
 import { settingsRepository } from '../repositories/settings.repository.js';
 import { exerciseRepository } from '../repositories/exercise.repository.js';
-import { forwardVocabToKnowledgeBase } from './knowledge-base.service.js';
+import { notifyNewVocabSaved } from '../jobs/kb-forward-signal.js';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -104,6 +104,17 @@ const BOOK_UPDATE_FIELDS = [
   'lastAccessedScrollProgress',
   'lastAccessedWordIndex',
 ] as const;
+
+// Knowledge-base outbox bookkeeping on vocabulary rows (src/jobs/kb-forward.ts).
+// Server-only: stripped from every row sent to a client and from every row a
+// client pushes, so no device can mark a word forwarded (or owed) by itself.
+export const KB_OUTBOX_FIELDS = ['kbForwardedAt', 'kbForwardAttempts', 'kbNextAttemptAt', 'kbLastError'] as const;
+
+export function withoutKbOutboxFields<T extends Record<string, unknown>>(row: T): T {
+  const out = { ...row };
+  for (const k of KB_OUTBOX_FIELDS) delete (out as Record<string, unknown>)[k];
+  return out;
+}
 
 function pickFields(entity: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -441,11 +452,13 @@ export const syncService = {
     }
 
     // Vocabulary
+    let savedNewVocab = false;
     for (const clientWord of payload.changes.vocabulary) {
       try {
         if (!isValidUuid(clientWord.id)) continue;
-        // Checked before the knowledge-base forward below: a deleted word must
-        // never be re-forwarded (it would be, on every sync, before failing).
+        // Checked before the new-word insert below: a deleted word must never be
+        // re-created, because a new row is owed to the knowledge base and would
+        // be forwarded again.
         const tombstone = serverVocabMap.get(clientWord.id);
         if (tombstone?.deletedAt) {
           if (tombstone.userId === userId) tombstones.vocabulary.push(tombstone);
@@ -455,42 +468,22 @@ export const syncService = {
         if (clientWord.bookId && isValidUuid(clientWord.bookId as string)) {
           if (!existingBookIdSet.has(clientWord.bookId as string)) continue;
         }
-        const coerced = coerceDates(clientWord);
+        const coerced = withoutKbOutboxFields(coerceDates(clientWord));
         const server = serverVocabMap.get(clientWord.id) ?? null;
         if (!server) {
-          // 2026-05-16: forward NEW vocab captures up to the personal-website
-          // knowledge base. We still write a local row so the sync bookkeeping
-          // (server-changes for incremental pulls, dirty-flag clearing on the
-          // client) keeps working — but the user-facing source of truth for
-          // vocab is now the knowledge base, not this PG table.
-          //
-          // If the forward fails the local insert is skipped and the entry is
-          // pushed onto failedEntities so the WordByWord sync layer re-bumps
-          // updatedAt and retries on the next tick. That preserves the
-          // local-first guarantee: IndexedDB still has the word; it just
-          // hasn't reached the knowledge base yet.
-          try {
-            await forwardVocabToKnowledgeBase({
-              word: String(clientWord.word ?? ''),
-              pronunciation: (clientWord.pronunciation as string) ?? undefined,
-              translation: (clientWord.translation as string) ?? undefined,
-              targetLanguage: (clientWord.targetLanguage as string) ?? undefined,
-              definition: (clientWord.definition as string) ?? undefined,
-              contextSentence: (clientWord.contextSentence as string) ?? undefined,
-              explanation: (clientWord.explanation as string) ?? undefined,
-              bookTitle: (clientWord.bookTitle as string) ?? undefined,
-              sectionTitle: (clientWord.sectionTitle as string) ?? undefined,
-              page: (clientWord.page as number) ?? undefined,
-            });
-          } catch (forwardErr) {
-            console.error('[sync] forward to knowledge base failed:', clientWord.id, forwardErr);
-            failedEntities.vocabulary.push(clientWord.id);
-            continue;
-          }
+          // Every NEW word still has to reach the personal-website knowledge
+          // base (the user-facing source of truth since 2026-05-16), but it no
+          // longer happens inside this request. Since 2026-11-17 the word is
+          // saved here first with kb_forwarded_at NULL (= owed to the KB), and
+          // src/jobs/kb-forward.ts forwards it in the background, retrying with
+          // backoff until the KB accepts it. Before, the forward ran inline
+          // with a 10s timeout and a slow KB failed the word, so the client
+          // showed "Sync failed" and re-pushed it until the KB answered in time.
           await vocabularyRepository.create({
             ...coerced,
             userId,
           } as any);
+          savedNewVocab = true;
         } else {
           // Security: skip vocab not owned by the authenticated user (matches books pattern at L224).
           if (server.userId !== userId) continue;
@@ -511,6 +504,9 @@ export const syncService = {
         failedEntities.vocabulary.push(clientWord.id);
       }
     }
+    // Start forwarding now rather than at the next sweep. Fire-and-forget: the
+    // response never waits on the knowledge base.
+    if (savedNewVocab) notifyNewVocabSaved();
 
     // Settings
     // Per-entity guard: a malformed settings blob must not throw and 500 the
@@ -652,7 +648,8 @@ export const syncService = {
     }
 
     // Vocabulary
-    const serverVocabulary = withTombstones(await vocabularyRepository.findModifiedSince(userId, since), tombstones.vocabulary);
+    const serverVocabulary = withTombstones(await vocabularyRepository.findModifiedSince(userId, since), tombstones.vocabulary)
+      .map((row) => withoutKbOutboxFields(row as unknown as Record<string, unknown>));
 
     // Settings
     const serverSettings = await settingsRepository.findModifiedSince(userId, since);

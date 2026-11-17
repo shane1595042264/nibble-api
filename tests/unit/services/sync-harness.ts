@@ -1,4 +1,5 @@
 import { vi } from 'vitest';
+import { onNewVocabSaved } from '../../../src/jobs/kb-forward-signal.js';
 
 // In-memory stand-ins for every repository syncService.sync() touches, so the
 // push/pull logic runs end to end without Postgres. Shared by the sync-*.test.ts
@@ -59,18 +60,24 @@ type Table = ReturnType<typeof table>;
 
 /** The mocked repositories read through these handles, so resetDb() swaps in empty tables. */
 export const db = {} as { books: Table; chapters: Table; sections: Table; vocab: Table };
-export const forward = vi.fn();
+/**
+ * Wake-ups sync sends the knowledge-base forwarder after saving new words.
+ * Sync itself never talks to the KB (since 2026-11-17 the forward runs in
+ * src/jobs/kb-forward.ts), so this is the only KB-facing effect to assert on.
+ */
+export const kbWake = vi.fn();
 
 export function resetDb() {
   db.books = table('books');
   db.chapters = table('chapters');
   db.sections = table('sections');
   db.vocab = table('vocabulary');
-  forward.mockReset();
+  kbWake.mockReset();
+  onNewVocabSaved(kbWake);
   pull.pageSize = 5000;
 }
 
-/** Mock the repositories and the knowledge-base forward, then load the real sync service. */
+/** Mock the repositories, then load the real sync service. */
 export async function loadSyncService() {
   vi.doMock('../../../src/repositories/book.repository.js', () => ({
     bookRepository: {
@@ -98,7 +105,6 @@ export async function loadSyncService() {
   vi.doMock('../../../src/repositories/exercise.repository.js', () => ({
     exerciseRepository: { findProgressByUserId: async () => [], findProgressModifiedSince: async () => [], findByCatalogIds: async () => [] },
   }));
-  vi.doMock('../../../src/services/knowledge-base.service.js', () => ({ forwardVocabToKnowledgeBase: forward }));
 
   const { syncService } = await import('../../../src/services/sync.service.js');
   return syncService;

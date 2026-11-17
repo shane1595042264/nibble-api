@@ -161,12 +161,26 @@ export const vocabulary = pgTable('vocabulary', {
   deletedAt: timestamp('deleted_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow().$onUpdate(() => new Date()),
+  // Knowledge-base forward outbox (2026-11-17). A new word is saved first and
+  // forwarded to the personal-website knowledge base by src/jobs/kb-forward.ts.
+  // NULL = still owed to the KB. Server-only bookkeeping: never sent to or
+  // accepted from clients (see KB_OUTBOX_FIELDS in sync.service.ts), and only
+  // ever written with raw SQL so it never bumps updated_at.
+  kbForwardedAt: timestamp('kb_forwarded_at'),
+  kbForwardAttempts: integer('kb_forward_attempts').notNull().default(0),
+  /** Earliest time the forwarder may try (backoff after a failure, or a claim lease). */
+  kbNextAttemptAt: timestamp('kb_next_attempt_at'),
+  kbLastError: text('kb_last_error'),
 }, (table) => [
   index('idx_vocabulary_user_id').on(table.userId),
   index('idx_vocabulary_user_word').on(table.userId, table.word),
   index('idx_vocabulary_user_updated').on(table.userId, table.updatedAt),
   index('idx_vocabulary_book_id').on(table.bookId),
   index('idx_vocabulary_word').on(table.word),
+  // Only the (normally empty) set of words still owed to the knowledge base.
+  index('idx_vocabulary_kb_pending')
+    .on(table.kbNextAttemptAt)
+    .where(sql`${table.kbForwardedAt} IS NULL AND ${table.deletedAt} IS NULL`),
 ]);
 
 // ============ EXERCISES (shared, linked to catalog) ============
