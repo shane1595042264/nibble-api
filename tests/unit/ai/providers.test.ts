@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ProviderError, generate, classify } from '../../../src/ai/providers.js';
+import { ProviderError, generate, classify, listModels } from '../../../src/ai/providers.js';
 
 const IMG = { mediaType: 'image/png', data: 'iVBORw0KGgo=' };
 
@@ -62,6 +62,51 @@ describe('generate: request shapes with page images and JSON', () => {
     expect(body.generationConfig.responseMimeType).toBe('application/json');
     expect(f.mock.calls[0][1].headers['x-goog-api-key']).toBe('AIzaK');
     expect(r).toEqual({ text: 'answer', inputTokens: 4, outputTokens: 10, truncated: false });
+  });
+});
+
+describe('the OpenAI-compatible providers share one path', () => {
+  it('Groq: its own base URL, a bearer key, max_tokens, no response_format', async () => {
+    const f = stubFetch(ok({ choices: [{ message: { content: '{"a":1}' } }], usage: { prompt_tokens: 3, completion_tokens: 2 } }));
+    await generate('groq', 'gsk_k', 'llama-3.3-70b-versatile', { prompt: 'P', maxTokens: 20, json: true });
+    expect(f.mock.calls[0][0]).toBe('https://api.groq.com/openai/v1/chat/completions');
+    expect(f.mock.calls[0][1].headers.Authorization).toBe('Bearer gsk_k');
+    const body = sentBody(f);
+    expect(body.max_tokens).toBe(20);
+    expect(body.response_format).toBeUndefined();
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it('DeepSeek asks for JSON; a reasoning model gets headroom and its <think> block is dropped', async () => {
+    const f = stubFetch(ok({ choices: [{ message: { content: '<think>hmm</think>\n{"ok":true}' } }], usage: {} }));
+    const r = await generate('deepseek', 'sk-k', 'deepseek-reasoner', { prompt: 'P', maxTokens: 20, json: true });
+    const body = sentBody(f);
+    expect(body.response_format).toEqual({ type: 'json_object' });
+    expect(body.max_tokens).toBe(20 + 2048);
+    expect(r.text).toBe('{"ok":true}');
+  });
+
+  it('a key on a regional server is called there; anything else falls back to the default', async () => {
+    const f = stubFetch(ok({ choices: [{ message: { content: 'x' } }] }));
+    await generate('qwen', 'sk-k', 'qwen-flash', { prompt: 'P', maxTokens: 5 }, { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' });
+    await generate('qwen', 'sk-k', 'qwen-flash', { prompt: 'P', maxTokens: 5 }, { baseUrl: 'https://attacker.example/v1' });
+    expect(f.mock.calls[0][0]).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+    expect(f.mock.calls[1][0]).toBe('https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions');
+  });
+
+  it('lists models from {data:[...]} or a bare array, and falls back to known models where there is no list', async () => {
+    stubFetch(ok([{ id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' }, { id: 'x' }]));
+    expect(await listModels('together', 'k')).toEqual(['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'x']);
+    stubFetch(fail(404, { error: { message: 'Not Found' } }));
+    expect(await listModels('zhipu', 'k')).toContain('glm-4.5-flash');
+    stubFetch(fail(404, { error: { message: 'Not Found' } }));
+    await expect(listModels('mistral', 'k')).rejects.toBeInstanceOf(ProviderError);
+  });
+
+  it('a Gemini "AQ." key goes in the same x-goog-api-key header as the old format', async () => {
+    const f = stubFetch(ok({ models: [{ name: 'models/gemini-2.5-flash-lite', supportedGenerationMethods: ['generateContent'] }] }));
+    expect(await listModels('gemini', 'AQ.Ab8Rxyz')).toEqual(['gemini-2.5-flash-lite']);
+    expect(f.mock.calls[0][1].headers['x-goog-api-key']).toBe('AQ.Ab8Rxyz');
   });
 });
 

@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { aiService, type AiCallContext } from '../services/ai.service.js';
 import { AppError } from '../lib/errors.js';
 import { assertUuidPathParam } from '../lib/query-guards.js';
-import { AI_PROVIDERS, PROVIDER_LABEL, type AiProvider } from '../ai/detect.js';
+import { AI_PROVIDERS, type AiProvider } from '../ai/detect.js';
+import { providerCatalog } from '../ai/registry.js';
 import * as repo from '../ai/repo.js';
 import { KeyCheckError, addKey, recheckKey } from '../ai/service.js';
 
@@ -47,8 +48,10 @@ function parseOr400<T>(schema: z.ZodType<T>, body: unknown): T {
 aiRoutes.get('/keys', async (c) => {
   const userId = c.get('user').id;
   const [keys, settings] = await Promise.all([repo.listKeys(userId), repo.getSettings(userId)]);
-  return c.json({ keys: keys.map(repo.publicKey), settings, providers: PROVIDER_LABEL });
+  return c.json({ keys: keys.map(repo.publicKey), settings, providers: providerCatalog() });
 });
+
+const providerEnum = z.enum(AI_PROVIDERS as [AiProvider, ...AiProvider[]]);
 
 const KEY_CHECK_STATUS: Record<KeyCheckError['code'], { code: string; status: number }> = {
   unknown_provider: { code: 'AI_KEY_UNKNOWN_PROVIDER', status: 400 },
@@ -58,12 +61,16 @@ const KEY_CHECK_STATUS: Record<KeyCheckError['code'], { code: string; status: nu
   unreachable: { code: 'AI_PROVIDER_UNREACHABLE', status: 502 },
 };
 
-// Paste a key: the provider is detected from its format, then the key is
-// proved by one real (one-token) call before it is sealed and stored.
+// Paste a key: the provider is detected from its format (or named by the
+// reader), then the key is proved by one real (one-token) call before it is
+// sealed and stored.
 aiRoutes.post('/keys', async (c) => {
-  const { key } = parseOr400(z.object({ key: z.string().trim().min(1).max(400) }).strict(), await c.req.json());
+  const { key, provider } = parseOr400(
+    z.object({ key: z.string().trim().min(1).max(400), provider: providerEnum.optional() }).strict(),
+    await c.req.json(),
+  );
   try {
-    const row = await addKey(c.get('user').id, key);
+    const row = await addKey(c.get('user').id, key, provider);
     return c.json({ key: repo.publicKey(row) }, 201);
   } catch (err) {
     if (err instanceof KeyCheckError) {
@@ -109,7 +116,7 @@ aiRoutes.delete('/keys/:id', async (c) => {
 
 aiRoutes.patch('/settings', async (c) => {
   const patch = parseOr400(
-    z.object({ preferredProvider: z.enum(AI_PROVIDERS as [AiProvider, ...AiProvider[]]).nullable().optional() }).strict(),
+    z.object({ preferredProvider: providerEnum.nullable().optional() }).strict(),
     await c.req.json(),
   );
   return c.json({ settings: await repo.saveSettings(c.get('user').id, patch) });

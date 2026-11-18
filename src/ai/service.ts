@@ -6,8 +6,9 @@
 import { AppError } from '../lib/errors.js';
 import { costMicroUsd, rankModels, supportsImages } from './catalog.js';
 import { openKey, sealKey } from './crypto.js';
-import { AI_PROVIDERS, PROVIDER_LABEL, detectProvider, keyHint, type AiProvider } from './detect.js';
+import { PROVIDER_LABEL, detectProviders, isProvider, keyHint, providerList, type AiProvider } from './detect.js';
 import { ProviderError, generate, listModels, type GenerateInput } from './providers.js';
+import { PROVIDER_SPECS } from './registry.js';
 import * as repo from './repo.js';
 
 /** What a call was for; stored on every usage event. */
@@ -27,6 +28,13 @@ export type AiFeature =
 /** How many models the key check will try before giving up on a key. */
 const MAX_PROBES = 4;
 
+/**
+ * Listing models while working out whose key it is. Short: a wrong guess is a
+ * fast 401, and a provider that hangs shouldn't hold the reader for 25s per
+ * region.
+ */
+const DETECT_TIMEOUT_MS = 10_000;
+
 export class KeyCheckError extends Error {
   constructor(
     readonly code: 'unknown_provider' | 'auth' | 'quota' | 'no_models' | 'unreachable',
@@ -44,23 +52,28 @@ export class KeyCheckError extends Error {
  * lists models happily and fails every real call, and that is the case worth
  * catching while the reader is still on the Settings page.
  */
-export async function checkKey(provider: AiProvider, key: string, userId: string) {
+export async function checkKey(provider: AiProvider, key: string, userId: string, baseUrl?: string | null) {
+  const label = PROVIDER_LABEL[provider];
+  const reason = (err: ProviderError) => err.message.replace(/[.\s]+$/, '');
   let listed: string[];
   try {
-    listed = await listModels(provider, key);
+    listed = await listModels(provider, key, { baseUrl, timeoutMs: DETECT_TIMEOUT_MS });
   } catch (err) {
     if (err instanceof ProviderError && err.kind === 'auth') {
-      throw new KeyCheckError('auth', `The provider rejected this key: ${err.message}`);
+      throw new KeyCheckError('auth', `${label} rejected this key: ${reason(err)}.`);
     }
-    throw new KeyCheckError('unreachable', err instanceof Error ? err.message : 'Could not reach the provider');
+    if (err instanceof ProviderError && err.kind === 'quota') {
+      throw new KeyCheckError('quota', `The key is valid but the ${label} account cannot run models: ${reason(err)}.`);
+    }
+    throw new KeyCheckError('unreachable', `Could not reach ${label}: ${err instanceof Error ? err.message : 'no answer'}`);
   }
   const models = rankModels(provider, listed);
-  if (models.length === 0) throw new KeyCheckError('no_models', 'This key cannot use any text model.');
+  if (models.length === 0) throw new KeyCheckError('no_models', `This ${label} key cannot use any text model.`);
 
   let lastError: ProviderError | null = null;
   for (const model of models.slice(0, MAX_PROBES)) {
     try {
-      const r = await generate(provider, key, model, { system: 'Reply with one word.', prompt: 'ok', maxTokens: 8 });
+      const r = await generate(provider, key, model, { system: 'Reply with one word.', prompt: 'ok', maxTokens: 8 }, { baseUrl });
       await repo.recordUsage({
         userId,
         provider,
@@ -74,29 +87,63 @@ export async function checkKey(provider: AiProvider, key: string, userId: string
     } catch (err) {
       if (!(err instanceof ProviderError)) throw err;
       lastError = err;
-      if (err.kind === 'auth') throw new KeyCheckError('auth', `The provider rejected this key: ${err.message}`);
+      if (err.kind === 'auth') throw new KeyCheckError('auth', `${label} rejected this key: ${reason(err)}.`);
       if (err.kind === 'quota') {
-        throw new KeyCheckError('quota', `The key is valid but the account cannot run models: ${err.message}`);
+        throw new KeyCheckError('quota', `The key is valid but the ${label} account cannot run models: ${reason(err)}.`);
       }
       // "model", "rate", "timeout", "other": try the next model.
     }
   }
-  throw new KeyCheckError('no_models', `None of the cheapest models answered${lastError ? `: ${lastError.message}` : '.'}`);
+  throw new KeyCheckError('no_models', `None of ${label}'s cheapest models answered${lastError ? `: ${lastError.message}` : '.'}`);
 }
 
-export async function addKey(userId: string, rawKey: string) {
+/**
+ * Add (or replace) the reader's key for its provider. `chosen` is the provider
+ * the reader picked in Settings; without one the key's format decides
+ * (detect.ts). Each candidate provider is asked in turn, on each of its
+ * regional servers, and the first that accepts the key keeps it: a 401 means
+ * "not this one, try the next", while a key that a provider accepts but can't
+ * use (no credit, no models) is reported for that provider straight away.
+ */
+export async function addKey(userId: string, rawKey: string, chosen?: AiProvider) {
   const key = rawKey.trim();
-  const detection = detectProvider(key);
-  if (!detection.provider) throw new KeyCheckError('unknown_provider', detection.reason);
-  const { models, defaultModel } = await checkKey(detection.provider, key, userId);
-  return repo.upsertKey({
-    userId,
-    provider: detection.provider,
-    keySealed: sealKey(key),
-    keyHint: keyHint(key),
-    models,
-    defaultModel,
-  });
+  const detection = detectProviders(key);
+  if (detection.fatal) throw new KeyCheckError('unknown_provider', detection.reason ?? 'That is not an API key.');
+  const candidates = chosen ? [chosen] : detection.candidates;
+  if (candidates.length === 0) {
+    throw new KeyCheckError('unknown_provider', detection.reason ?? 'Choose the provider this key is for.');
+  }
+
+  let rejected: KeyCheckError | null = null;
+  let unreachable: KeyCheckError | null = null;
+  for (const provider of candidates) {
+    const { baseUrls } = PROVIDER_SPECS[provider];
+    for (const baseUrl of baseUrls) {
+      try {
+        const { models, defaultModel } = await checkKey(provider, key, userId, baseUrl);
+        return await repo.upsertKey({
+          userId,
+          provider,
+          keySealed: sealKey(key),
+          baseUrl: baseUrl === baseUrls[0] ? null : baseUrl,
+          keyHint: keyHint(key),
+          models,
+          defaultModel,
+        });
+      } catch (err) {
+        if (!(err instanceof KeyCheckError)) throw err;
+        if (err.code === 'auth') rejected = err;
+        else if (err.code === 'unreachable') unreachable ??= err;
+        else throw err; // the key is this provider's; say what's wrong with it
+      }
+    }
+  }
+  if (candidates.length === 1) throw rejected ?? unreachable!;
+  if (!rejected) throw unreachable!;
+  throw new KeyCheckError(
+    'auth',
+    `${providerList(candidates)} did not accept this key. If it is from another provider, choose that provider and add it again.`,
+  );
 }
 
 /**
@@ -108,7 +155,8 @@ export async function recheckKey(userId: string, id: string) {
   if (!row) return null;
   let updated: repo.KeyRow | null;
   try {
-    const { models, defaultModel } = await checkKey(row.provider as AiProvider, openKey(row.keySealed), userId);
+    if (!isProvider(row.provider)) throw new KeyCheckError('unknown_provider', `Nibbler no longer supports ${row.provider} keys.`);
+    const { models, defaultModel } = await checkKey(row.provider, openKey(row.keySealed), userId, row.baseUrl);
     const keepPreferred = row.preferredModel && models.includes(row.preferredModel) ? row.preferredModel : null;
     updated = await repo.updateKey(
       userId,
@@ -146,7 +194,7 @@ export interface Candidate {
  * listed; a key with none is skipped.
  */
 export function candidatesFor(keys: repo.KeyRow[], settings: repo.AiSettings, needsImages: boolean): Candidate[] {
-  const usable = keys.filter((k) => k.status === 'ok' && (AI_PROVIDERS as string[]).includes(k.provider));
+  const usable = keys.filter((k) => k.status === 'ok' && isProvider(k.provider));
   const ordered = [
     ...usable.filter((k) => k.provider === settings.preferredProvider),
     ...usable.filter((k) => k.provider !== settings.preferredProvider),
@@ -186,7 +234,7 @@ function noKeyError(keys: repo.KeyRow[], needsImages: boolean): AppError {
   if (keys.some((k) => k.status === 'ok') && needsImages) {
     return new AppError(
       'AI_KEY_NO_VISION',
-      'None of your AI keys has a model that can read page images. Add a Gemini, OpenAI or Anthropic key in Settings.',
+      'None of your AI keys has a model that can read page images. Add one that does (Gemini, OpenAI, Anthropic or Qwen, for example) in Settings > AI.',
       409,
     );
   }
@@ -245,7 +293,7 @@ export async function runAi(userId: string, feature: AiFeature, input: RunInput)
       continue;
     }
     try {
-      const r = await generate(provider, key, model, input);
+      const r = await generate(provider, key, model, input, { baseUrl: row.baseUrl });
       const cost = costMicroUsd(provider, model, r.inputTokens, r.outputTokens);
       await repo.recordUsage({
         userId,

@@ -28,10 +28,12 @@ export const users = pgTable('users', {
 export const userAiKeys = pgTable('user_ai_keys', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  /** 'gemini' | 'openai' | 'anthropic' | 'xai', detected from the key's format. */
+  /** An AiProvider from src/ai/registry.ts, detected from the key or picked by the reader. */
   provider: text('provider').notNull(),
   /** base64(iv | tag | ciphertext). Never leaves the server. */
   keySealed: text('key_sealed').notNull(),
+  /** The regional server the key answered on (Qwen, Kimi, GLM...); null = the provider's default. */
+  baseUrl: text('base_url'),
   /** Last four characters, to tell keys apart in Settings. */
   keyHint: text('key_hint').notNull(),
   /** Text models the key listed at its last check, cheapest first. */

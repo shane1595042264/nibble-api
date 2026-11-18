@@ -1,7 +1,9 @@
-// The four providers a reader's key can belong to, behind one shape. Ported
-// from shaneBackend modules/ai/providers.ts (SHAN-596), extended for Nibbler:
+// Every provider a reader's key can belong to, behind one shape. Ported from
+// shaneBackend modules/ai/providers.ts (SHAN-596), extended for Nibbler:
 // requests can carry page images (OCR, table-of-contents reading, figure
-// explanation) and can ask for a JSON object back.
+// explanation) and can ask for a JSON object back. Anthropic and Gemini have
+// their own wire format; every other provider in registry.ts speaks OpenAI
+// chat completions at its own base URL, so they share one code path.
 //
 // Every call has a deadline (no fetch here has a default one) and every
 // provider failure becomes a ProviderError with a `kind` the service and
@@ -11,9 +13,16 @@
 // they are about the reader's own account. A client disconnect is not a
 // provider failure; the caller's AbortError is rethrown untouched.
 
-import type { AiProvider } from './detect.js';
+import { PROVIDER_SPECS, baseUrlOf, type AiProvider } from './registry.js';
 
 export const DEFAULT_TIMEOUT_MS = 25_000;
+
+/** Which of a provider's regional servers to call; the provider's default when omitted. */
+export interface CallOptions {
+  baseUrl?: string | null;
+  /** Listing only: a shorter deadline while working out whose key it is. */
+  timeoutMs?: number;
+}
 
 export type ProviderErrorKind = 'auth' | 'quota' | 'model' | 'rate' | 'timeout' | 'other';
 
@@ -57,17 +66,41 @@ export interface GenerateResult {
 }
 
 function providerMessage(body: unknown, fallback: string): string {
-  const b = body as { error?: { message?: string } | string; message?: string } | null;
-  const msg = (typeof b?.error === 'string' ? b.error : b?.error?.message) ?? b?.message ?? fallback;
+  const b = body as {
+    error?: { message?: string } | string;
+    message?: string;
+    detail?: string | { msg?: string }[];
+    msg?: string;
+  } | null;
+  const detail = typeof b?.detail === 'string' ? b.detail : Array.isArray(b?.detail) ? b.detail[0]?.msg : undefined;
+  const msg = (typeof b?.error === 'string' ? b.error : b?.error?.message) ?? b?.message ?? detail ?? b?.msg ?? fallback;
   return String(msg).replace(/\s+/g, ' ').slice(0, 300);
 }
 
 export function classify(status: number, message: string): ProviderErrorKind {
   const m = message.toLowerCase();
-  if (status === 401 || status === 403 || m.includes('api key not valid') || m.includes('invalid api key') || m.includes('incorrect api key')) {
+  if (
+    status === 401 ||
+    status === 403 ||
+    m.includes('api key not valid') ||
+    m.includes('invalid api key') ||
+    m.includes('incorrect api key') ||
+    m.includes('invalid_api_key') ||
+    m.includes('authentication fails') ||
+    m.includes('unauthorized')
+  ) {
     return 'auth';
   }
-  if (status === 402 || m.includes('credit balance') || m.includes('insufficient_quota') || m.includes('exceeded your current quota') || m.includes('billing')) {
+  if (
+    status === 402 ||
+    m.includes('credit balance') ||
+    m.includes('insufficient_quota') ||
+    m.includes('insufficient balance') ||
+    m.includes('exceeded your current quota') ||
+    m.includes('billing') ||
+    m.includes('arrearage') ||
+    m.includes('余额')
+  ) {
     return 'quota';
   }
   if (status === 404 || m.includes('no longer available') || m.includes('does not exist') || m.includes('not found') || m.includes('not supported for generatecontent')) {
@@ -115,38 +148,71 @@ function geminiHeaders(key: string) {
   return { 'x-goog-api-key': key, 'Content-Type': 'application/json' };
 }
 
-export async function listModels(provider: AiProvider, key: string): Promise<string[]> {
-  switch (provider) {
-    case 'openai': {
-      const b = (await call('https://api.openai.com/v1/models', { headers: bearer(key) }, DEFAULT_TIMEOUT_MS)) as { data?: { id: string }[] };
-      return (b.data ?? []).map((m) => m.id);
-    }
-    case 'xai': {
-      const b = (await call('https://api.x.ai/v1/models', { headers: bearer(key) }, DEFAULT_TIMEOUT_MS)) as { data?: { id: string }[] };
-      return (b.data ?? []).map((m) => m.id);
-    }
+/** OpenAI-compatible /models: `{ data: [{ id }] }`, or a bare array (Together). */
+function idsOf(body: unknown): string[] {
+  const list = Array.isArray(body) ? body : (body as { data?: unknown[] } | null)?.data ?? [];
+  return list
+    .map((m) => (m && typeof m === 'object' ? (m as { id?: unknown }).id : undefined))
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+}
+
+export async function listModels(provider: AiProvider, key: string, opts: CallOptions = {}): Promise<string[]> {
+  const spec = PROVIDER_SPECS[provider];
+  const base = baseUrlOf(provider, opts.baseUrl);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  switch (spec.api) {
     case 'anthropic': {
-      const b = (await call('https://api.anthropic.com/v1/models?limit=100', { headers: anthropicHeaders(key) }, DEFAULT_TIMEOUT_MS)) as {
+      const b = (await call(`${base}/models?limit=100`, { headers: anthropicHeaders(key) }, timeoutMs)) as {
         data?: { id: string }[];
       };
       return (b.data ?? []).map((m) => m.id);
     }
     case 'gemini': {
-      const b = (await call('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+      const b = (await call(`${base}/models?pageSize=1000`, {
         headers: geminiHeaders(key),
-      }, DEFAULT_TIMEOUT_MS)) as { models?: { name: string; supportedGenerationMethods?: string[] }[] };
+      }, timeoutMs)) as { models?: { name: string; supportedGenerationMethods?: string[] }[] };
       return (b.models ?? [])
         .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
         .map((m) => m.name.replace(/^models\//, ''));
     }
+    case 'openai': {
+      try {
+        return idsOf(await call(`${base}/models`, { headers: bearer(key) }, timeoutMs));
+      } catch (err) {
+        // No models endpoint on this provider: the key check proves the key on
+        // one of the known models instead.
+        if (spec.staticModels && err instanceof ProviderError && (err.status === 404 || err.status === 405)) {
+          return [...spec.staticModels];
+        }
+        throw err;
+      }
+    }
   }
 }
 
-/** Reasoning models spend hidden tokens before the visible answer. */
+/**
+ * Reasoning models spend hidden tokens before the visible answer, and several
+ * of them count those against the same budget.
+ */
 function isReasoning(provider: AiProvider, model: string): boolean {
   if (provider === 'openai') return /^(gpt-5|o\d)/.test(model);
   if (provider === 'xai') return model.includes('grok-3-mini');
-  return false;
+  return /gpt-oss|reasoner|thinking|qwq|(^|[/-])r1\b|magistral|glm-4\.[5-9]|glm-[5-9]|kimi-k2/i.test(model);
+}
+
+/** Some providers inline the reasoning as <think>...</think> before the answer. */
+function stripThinking(text: string): string {
+  return text.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, '');
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : ''))
+      .join('');
+  }
+  return '';
 }
 
 export async function generate(
@@ -154,21 +220,23 @@ export async function generate(
   key: string,
   model: string,
   input: GenerateInput,
+  opts: CallOptions = {},
 ): Promise<GenerateResult> {
   const images = input.images ?? [];
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  switch (provider) {
-    case 'openai':
-    case 'xai': {
+  const spec = PROVIDER_SPECS[provider];
+  const base = baseUrlOf(provider, opts.baseUrl);
+  switch (spec.api) {
+    case 'openai': {
       const reasoning = isReasoning(provider, model);
-      const url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.x.ai/v1/chat/completions';
+      const budget = input.maxTokens + (reasoning ? 2048 : 0);
       const userContent = images.length === 0
         ? input.prompt
         : [
           ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mediaType};base64,${img.data}` } })),
           { type: 'text', text: input.prompt },
         ];
-      const b = (await call(url, {
+      const b = (await call(`${base}/chat/completions`, {
         method: 'POST',
         headers: bearer(key),
         body: JSON.stringify({
@@ -178,19 +246,17 @@ export async function generate(
             { role: 'user', content: userContent },
           ],
           // OpenAI's newer models take max_completion_tokens and reject
-          // max_tokens; xAI documents max_tokens.
-          ...(provider === 'openai'
-            ? { max_completion_tokens: input.maxTokens + (reasoning ? 1024 : 0) }
-            : { max_tokens: input.maxTokens + (reasoning ? 1024 : 0) }),
-          ...(reasoning ? { reasoning_effort: 'low' } : {}),
-          ...(input.json && provider === 'openai' ? { response_format: { type: 'json_object' } } : {}),
+          // max_tokens; everyone else documents max_tokens.
+          ...(spec.maxTokensParam === 'max_completion_tokens' ? { max_completion_tokens: budget } : { max_tokens: budget }),
+          ...(reasoning && (provider === 'openai' || provider === 'xai') ? { reasoning_effort: 'low' } : {}),
+          ...(input.json && spec.jsonMode ? { response_format: { type: 'json_object' } } : {}),
         }),
       }, timeoutMs, input.signal)) as {
-        choices?: { message?: { content?: string }; finish_reason?: string }[];
+        choices?: { message?: { content?: unknown }; finish_reason?: string }[];
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       return {
-        text: b.choices?.[0]?.message?.content ?? '',
+        text: stripThinking(textOf(b.choices?.[0]?.message?.content)),
         inputTokens: b.usage?.prompt_tokens ?? 0,
         outputTokens: b.usage?.completion_tokens ?? 0,
         truncated: b.choices?.[0]?.finish_reason === 'length',
@@ -203,7 +269,7 @@ export async function generate(
           ...images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } })),
           { type: 'text', text: input.prompt },
         ];
-      const b = (await call('https://api.anthropic.com/v1/messages', {
+      const b = (await call(`${base}/messages`, {
         method: 'POST',
         headers: anthropicHeaders(key),
         body: JSON.stringify({
@@ -225,7 +291,7 @@ export async function generate(
       };
     }
     case 'gemini': {
-      const b = (await call(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      const b = (await call(`${base}/models/${encodeURIComponent(model)}:generateContent`, {
         method: 'POST',
         headers: geminiHeaders(key),
         body: JSON.stringify({

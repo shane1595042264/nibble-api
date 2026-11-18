@@ -94,7 +94,34 @@ describe('key management', () => {
     const body = await res.json();
     expect(res.status).toBe(201);
     expect(JSON.stringify(body)).not.toContain('SEALED');
-    expect(body.key).toMatchObject({ provider: 'gemini', keyHint: 'abcd', imageModels: ['gemini-2.5-flash-lite'] });
+    expect(body.key).toMatchObject({ provider: 'gemini', keyHint: 'abcd', imageModels: ['gemini-2.5-flash-lite'], region: null });
+  });
+
+  it("passes the reader's provider pick through, and refuses one Nibbler doesn't know", async () => {
+    serviceMock.addKey.mockResolvedValue({
+      id: KEY_ID, userId: USER_ID, provider: 'qwen', keySealed: 'S', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      keyHint: 'abcd', models: ['qwen-flash'], defaultModel: 'qwen-flash', preferredModel: null, status: 'ok', lastError: null,
+      lastCheckedAt: new Date(), createdAt: new Date(),
+    });
+    const res = await post('/ai/keys', { key: 'sk-whatever-1234567890', provider: 'qwen' });
+    expect(res.status).toBe(201);
+    expect(serviceMock.addKey).toHaveBeenCalledWith(USER_ID, 'sk-whatever-1234567890', 'qwen');
+    expect((await res.json()).key).toMatchObject({ provider: 'qwen', region: 'China' });
+
+    serviceMock.addKey.mockClear();
+    expect((await post('/ai/keys', { key: 'k'.repeat(30), provider: 'my-own-llm' })).status).toBe(400);
+    expect(serviceMock.addKey).not.toHaveBeenCalled();
+  });
+
+  it('GET /keys lists every supported provider with its key format and where to get one', async () => {
+    repoMock.listKeys.mockResolvedValue([]);
+    repoMock.getSettings.mockResolvedValue({ preferredProvider: null });
+    const body = await (await app().request('/ai/keys')).json();
+    const ids = body.providers.map((p: { id: string }) => p.id);
+    expect(ids).toEqual(expect.arrayContaining(['gemini', 'openai', 'anthropic', 'xai', 'deepseek', 'groq', 'openrouter', 'qwen']));
+    expect(body.providers.find((p: { id: string }) => p.id === 'gemini')).toEqual({
+      id: 'gemini', label: 'Google Gemini', keyFormat: 'AQ.… or AIza…', keysUrl: 'https://aistudio.google.com/apikey',
+    });
   });
 
   it('refuses a preferred model the key never listed', async () => {

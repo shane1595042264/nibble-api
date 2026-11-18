@@ -5,14 +5,17 @@ import { and, asc, desc, eq, gte, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { aiUsageEvents, userAiKeys, userAiSettings } from '../db/schema.js';
 import { supportsImages } from './catalog.js';
-import { AI_PROVIDERS, type AiProvider } from './detect.js';
+import { isProvider, type AiProvider } from './detect.js';
 import { livePricesStatus } from './live-prices.js';
+import { regionOf } from './registry.js';
 
 export interface KeyRow {
   id: string;
   userId: string;
   provider: string;
   keySealed: string;
+  /** Regional server the key answered on; null = the provider's default. */
+  baseUrl: string | null;
   keyHint: string;
   models: unknown;
   defaultModel: string;
@@ -34,15 +37,16 @@ export function modelsOf(row: Pick<KeyRow, 'models'>): string[] {
 /** The shape Settings sees: never the sealed key. */
 export function publicKey(row: KeyRow) {
   const models = modelsOf(row);
-  const provider = row.provider as AiProvider;
-  const known = (AI_PROVIDERS as string[]).includes(row.provider);
+  const known = isProvider(row.provider);
   return {
     id: row.id,
     provider: row.provider,
+    /** "China" for a key on a provider's China server; null on its default one. */
+    region: known ? regionOf(row.provider as AiProvider, row.baseUrl) : null,
     keyHint: row.keyHint,
     models,
     /** Models on this key that can read page images (OCR, tables of contents, figures). */
-    imageModels: known ? models.filter((m) => supportsImages(provider, m)) : [],
+    imageModels: known ? models.filter((m) => supportsImages(row.provider as AiProvider, m)) : [],
     defaultModel: row.defaultModel,
     preferredModel: row.preferredModel,
     status: row.status,
@@ -73,6 +77,7 @@ export async function upsertKey(input: {
   userId: string;
   provider: AiProvider;
   keySealed: string;
+  baseUrl: string | null;
   keyHint: string;
   models: string[];
   defaultModel: string;
@@ -85,6 +90,7 @@ export async function upsertKey(input: {
       target: [userAiKeys.userId, userAiKeys.provider],
       set: {
         keySealed: input.keySealed,
+        baseUrl: input.baseUrl,
         keyHint: input.keyHint,
         models: input.models,
         defaultModel: input.defaultModel,
