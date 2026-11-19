@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Hono } from 'hono';
-import { parseTocSuggestions } from '../../../src/lib/toc-suggestions.js';
+import { parseTocSuggestions, detectTocPageOffset } from '../../../src/lib/toc-suggestions.js';
 import { errorHandler } from '../../../src/middleware/error-handler.js';
 
 // POST /books/:id/suggest-structure used to hand Claude's raw reply to a bare
@@ -63,5 +63,84 @@ describe('parseTocSuggestions', () => {
     expect(status).toBe(502);
     expect(body.error.code).toBe('AI_ERROR');
     expect(body.error.message).not.toBe('Internal server error');
+  });
+});
+
+// The TOC lists PRINTED page numbers; dividers are PDF pages. A book with 14 pages of
+// front matter has printed page 1 on PDF page 15, and Process TOC put every divider
+// 14 pages early. KAN-410.
+describe('detectTocPageOffset', () => {
+  const chapters = [
+    { title: 'Chapter 1: Getting Started', startPage: 1, endPage: 19 },
+    { title: 'Chapter 2: Methods of Analysis', startPage: 20, endPage: 40 },
+    { title: 'Chapter 3: Results and Discussion', startPage: 41, endPage: 60 },
+  ];
+
+  /** A 80-page book: pages listed in `pages` carry that text, the rest are prose. */
+  function book(pages: Record<number, string>) {
+    const reads: number[] = [];
+    return {
+      reads,
+      getPageText: async (n: number) => { reads.push(n); return pages[n] ?? 'Some ordinary body text on this page.'; },
+    };
+  }
+
+  it('reads the offset from /PageLabels when a page is labelled 1', async () => {
+    const labels = ['Cover', 'i', 'ii', 'iii', 'iv', '1', '2', '3'];
+    const { reads, getPageText } = book({});
+    const out = await detectTocPageOffset({ chapters, pageLabels: labels, numPages: 8, firstSearchPage: 4, getPageText });
+    expect(out).toEqual({ pageOffset: 5, pageOffsetSource: 'labels' });
+    expect(reads).toEqual([]);
+  });
+
+  it('finds the chapter openings after the TOC when there are no labels', async () => {
+    const { getPageText } = book({
+      15: 'CHAPTER 1 Getting  Started   Lorem ipsum',
+      34: 'Chapter 2 Methods of Analysis',
+      55: 'Results and Discussion',
+    });
+    const out = await detectTocPageOffset({ chapters, pageLabels: null, numPages: 80, firstSearchPage: 5, getPageText });
+    expect(out).toEqual({ pageOffset: 14, pageOffsetSource: 'titles' });
+  });
+
+  it('skips a TOC page the reader did not select (it names several titles)', async () => {
+    const { getPageText } = book({
+      5: 'Chapter 2: Methods of Analysis .... 20   Chapter 3: Results and Discussion .... 41',
+      15: 'Getting Started',
+      34: 'Methods of Analysis',
+    });
+    const out = await detectTocPageOffset({ chapters, pageLabels: null, numPages: 80, firstSearchPage: 5, getPageText });
+    expect(out).toEqual({ pageOffset: 14, pageOffsetSource: 'titles' });
+  });
+
+  it('lets the most common offset outvote a stray mention', async () => {
+    const { getPageText } = book({
+      8: 'In the preface we say Methods of Analysis matters',
+      15: 'Getting Started',
+      55: 'Results and Discussion',
+    });
+    const out = await detectTocPageOffset({ chapters, pageLabels: null, numPages: 80, firstSearchPage: 5, getPageText });
+    expect(out.pageOffset).toBe(14);
+  });
+
+  it('falls back to 0 when nothing matches (scanned book, no labels)', async () => {
+    const out = await detectTocPageOffset({
+      chapters, pageLabels: [], numPages: 80, firstSearchPage: 5, getPageText: async () => '',
+    });
+    expect(out).toEqual({ pageOffset: 0, pageOffsetSource: 'none' });
+  });
+
+  it('keeps offset 0 for a book whose printed pages are its PDF pages (control)', async () => {
+    const { getPageText } = book({ 1: 'Getting Started', 20: 'Methods of Analysis', 41: 'Results and Discussion' });
+    const out = await detectTocPageOffset({ chapters, pageLabels: null, numPages: 80, firstSearchPage: 1, getPageText });
+    expect(out).toEqual({ pageOffset: 0, pageOffsetSource: 'titles' });
+  });
+
+  it('survives a page whose text cannot be read', async () => {
+    const out = await detectTocPageOffset({
+      chapters, pageLabels: null, numPages: 80, firstSearchPage: 5,
+      getPageText: async (n) => { if (n === 6) throw new Error('bad page'); return n === 15 ? 'Getting Started' : ''; },
+    });
+    expect(out).toEqual({ pageOffset: 14, pageOffsetSource: 'titles' });
   });
 });

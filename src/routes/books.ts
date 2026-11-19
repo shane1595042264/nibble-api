@@ -4,7 +4,7 @@ import { bookService } from '../services/book.service.js';
 import { AppError } from '../lib/errors.js';
 import { config } from '../lib/config.js';
 import { assertUuidPathParam } from '../lib/query-guards.js';
-import { parseTocSuggestions } from '../lib/toc-suggestions.js';
+import { parseTocSuggestions, detectTocPageOffset } from '../lib/toc-suggestions.js';
 
 export const bookRoutes = new Hono();
 
@@ -575,7 +575,18 @@ Now parse the following TOC${images.length > 0 ? ' (the page images are attached
       }
     }
 
-    return c.json({ suggestions, flatChapters });
+    // The suggestions stay in printed page numbers; the client shifts them by
+    // pageOffset (and lets the reader correct it) before placing dividers. KAN-410.
+    const pageLabels: string[] | null = await doc.getPageLabels().catch(() => null);
+    const { pageOffset, pageOffsetSource } = await detectTocPageOffset({
+      chapters: suggestions.chapters,
+      pageLabels,
+      numPages: doc.numPages,
+      firstSearchPage: Math.max(...parsed.data.tocPages) + 1,
+      getPageText: (pageNum) => pdfService.extractPageTextFromDoc(doc, pageNum),
+    });
+
+    return c.json({ suggestions, flatChapters, pageOffset, pageOffsetSource });
   } finally {
     await doc.destroy().catch(() => {});
   }
