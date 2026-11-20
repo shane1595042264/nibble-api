@@ -636,4 +636,11 @@ describe('mapPageMarkdownToSections - partial Mathpix coverage (KAN-413)', () =>
     ]);
     expect(partialCount).toBe(0);
   });
+
+  it('counts a page Mathpix saw as empty as covered', () => {
+    const sections = [{ id: 'S', startPage: 10, endPage: 12 }];
+    const { updates, partialCount } = mapPageMarkdownToSections(sections, new Map([[10, 'p10'], [11, ''], [12, 'p12']]));
+    expect(updates).toEqual([{ sectionId: 'S', richContent: 'p10\n\np12' }]);
+    expect(partialCount).toBe(0);
+  });
 });

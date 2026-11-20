@@ -37,6 +37,14 @@ function isBlankRaster(context: any, width: number, height: number): boolean {
   return true;
 }
 
+/** Thrown by renderPageToImageFromDoc when the rendered page carries no ink. */
+export class BlankRasterError extends Error {
+  constructor(pageNumber: number) {
+    super(`PDF page ${pageNumber} rendered to a blank raster`);
+    this.name = 'BlankRasterError';
+  }
+}
+
 // ─── Document loading ──────────────────────────────────────────────
 
 /** Load a PDF document. Caller must call doc.destroy() when done. */
@@ -216,7 +224,7 @@ export const pdfService = {
     }).promise;
 
     if (isBlankRaster(context, canvas.width, canvas.height)) {
-      throw new Error(`PDF page ${pageNumber} rendered to a blank raster`);
+      throw new BlankRasterError(pageNumber);
     }
 
     return canvas.toBuffer('image/png');

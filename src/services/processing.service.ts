@@ -1,5 +1,5 @@
 import { storageService } from './storage.service.js';
-import { pdfService } from './pdf.service.js';
+import { pdfService, BlankRasterError } from './pdf.service.js';
 import type { OutlineItem } from './pdf.service.js';
 import { parseEpub } from './epub.service.js';
 import { billingService } from './billing.service.js';
@@ -347,7 +347,9 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
           if (sortedPages.length === 0) {
             await processingLogRepository.append(jobId, 'mathpix', 'No pages with tables/formulas detected — skipping Mathpix');
           } else {
-            // Process cherry-picked pages via per-page image API (5 concurrent)
+            // Process cherry-picked pages via per-page image API (5 concurrent).
+            // A page with no entry here is one Mathpix never covered; a genuinely
+            // empty page maps to '' so it doesn't count against its section.
             const pageMarkdown = new Map<number, string>(); // page number → markdown
             const CONCURRENCY = 5;
 
@@ -363,17 +365,24 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
                     const md = await mathpixService.convertPageToMarkdown(imageBuffer);
                     return { pageNum, md };
                   } catch (err: any) {
+                    // A blank page with no text has nothing for Mathpix to add.
+                    // A blank render of a page that DOES have text is a failed
+                    // render (KAN-315), so that one still leaves the page uncovered.
+                    if (err instanceof BlankRasterError) {
+                      const pageText = await pdfService.extractPageTextFromDoc(doc, pageNum).catch(() => null);
+                      if (pageText !== null && !pageText.trim()) return { pageNum, md: '' };
+                    }
                     await processingLogRepository.append(
                       jobId, 'mathpix',
                       `Warning: Mathpix failed for page ${pageNum}: ${err.message}`,
                       'warn',
                     );
-                    return { pageNum, md: '' };
+                    return { pageNum, md: null };
                   }
                 }),
               );
               for (const { pageNum, md } of results) {
-                if (md.trim()) pageMarkdown.set(pageNum, md);
+                if (md !== null) pageMarkdown.set(pageNum, md.trim() ? md : '');
               }
 
               // Progress: 75-80% range
@@ -381,7 +390,7 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
               await advance(jobId, progress, 'mathpix');
             }
 
-            await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned content for ${pageMarkdown.size} pages`);
+            await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned content for ${[...pageMarkdown.values()].filter(Boolean).length} pages`);
 
             // Map per-page markdown to sections
             const { updates, partialCount } = mapPageMarkdownToSections(sectionsForMathpix, pageMarkdown);
@@ -792,7 +801,8 @@ function walkOutlineTree(
  * partly covered section (a neighbour flagged for Mathpix shares its first
  * page, or one of its pages failed in Mathpix) would otherwise show only those
  * pages and silently lose the rest. Those sections keep richContent null and
- * fall back to the full extractedText (KAN-413).
+ * fall back to the full extractedText (KAN-413). A page mapped to '' counts as
+ * covered: Mathpix saw it and there was nothing on it.
  */
 export function mapPageMarkdownToSections(
   sections: { id: string; startPage: number | null; endPage: number | null }[],
@@ -805,13 +815,15 @@ export function mapPageMarkdownToSections(
     const endPage = section.endPage ?? startPage;
 
     const sectionMd: string[] = [];
+    let missing = 0;
     for (let page = startPage; page <= endPage; page++) {
       const md = pageMarkdown.get(page);
-      if (md) sectionMd.push(md);
+      if (md === undefined) missing++;
+      else if (md) sectionMd.push(md);
     }
 
     if (sectionMd.length === 0) continue;
-    if (sectionMd.length < endPage - startPage + 1) {
+    if (missing > 0) {
       partialCount++;
       continue;
     }
