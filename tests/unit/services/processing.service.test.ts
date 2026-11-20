@@ -87,6 +87,7 @@ vi.mock('../../../src/repositories/section.repository.js', () => ({
 
 import {
   buildStructureFromOutline,
+  mapPageMarkdownToSections,
   markBookErrored,
   processingService,
 } from '../../../src/services/processing.service.js';
@@ -600,5 +601,39 @@ describe('buildStructureFromOutline - mixed-depth outline order (KAN-384)', () =
       ['1.2', 4, 5],
       ['2.1', 6, 9],
     ]);
+  });
+});
+
+describe('mapPageMarkdownToSections - partial Mathpix coverage (KAN-413)', () => {
+  it('leaves a section that shares its first page with a flagged neighbour without richContent', () => {
+    const sections = [
+      { id: 'A', startPage: 30, endPage: 30 },
+      { id: 'B', startPage: 30, endPage: 45 },
+    ];
+    const { updates, partialCount } = mapPageMarkdownToSections(sections, new Map([[30, 'page 30 md']]));
+    expect(updates).toEqual([{ sectionId: 'A', richContent: 'page 30 md' }]);
+    expect(partialCount).toBe(1);
+  });
+
+  it('writes no richContent for a flagged section whose middle page failed in Mathpix', () => {
+    const sections = [{ id: 'S', startPage: 10, endPage: 12 }];
+    const { updates, partialCount } = mapPageMarkdownToSections(sections, new Map([[10, 'p10'], [12, 'p12']]));
+    expect(updates).toEqual([]);
+    expect(partialCount).toBe(1);
+  });
+
+  it('joins every page of a fully covered section and ignores sections with no Mathpix pages', () => {
+    const sections = [
+      { id: 'S', startPage: 10, endPage: 12 },
+      { id: 'T', startPage: 13, endPage: 20 },
+      { id: 'U', startPage: 5, endPage: null },
+    ];
+    const pages = new Map([[5, 'p5'], [10, 'p10'], [11, 'p11'], [12, 'p12']]);
+    const { updates, partialCount } = mapPageMarkdownToSections(sections, pages);
+    expect(updates).toEqual([
+      { sectionId: 'S', richContent: 'p10\n\np11\n\np12' },
+      { sectionId: 'U', richContent: 'p5' },
+    ]);
+    expect(partialCount).toBe(0);
   });
 });

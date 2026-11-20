@@ -384,25 +384,18 @@ async function orchestratePdfPipeline(jobId: string, fileHash: string, bookId: s
             await processingLogRepository.append(jobId, 'mathpix', `Mathpix returned content for ${pageMarkdown.size} pages`);
 
             // Map per-page markdown to sections
-            let mathpixCount = 0;
-            for (const section of sectionsForMathpix) {
-              const startPage = section.startPage ?? 1;
-              const endPage = section.endPage ?? startPage;
-
-              const sectionMd: string[] = [];
-              for (let page = startPage; page <= endPage; page++) {
-                const md = pageMarkdown.get(page);
-                if (md) sectionMd.push(md);
-              }
-
-              if (sectionMd.length > 0) {
-                const richContent = sectionMd.join('\n\n');
-                await sectionRepository.update(section.id, { richContent });
-                mathpixCount++;
-              }
+            const { updates, partialCount } = mapPageMarkdownToSections(sectionsForMathpix, pageMarkdown);
+            for (const { sectionId, richContent } of updates) {
+              await sectionRepository.update(sectionId, { richContent });
             }
 
-            await processingLogRepository.append(jobId, 'mathpix', `Mapped rich content to ${mathpixCount} sections`);
+            const partialNote = partialCount > 0
+              ? ` (${partialCount} skipped: Mathpix covered only part of their pages)`
+              : '';
+            await processingLogRepository.append(
+              jobId, 'mathpix',
+              `Mapped rich content to ${updates.length} sections${partialNote}`,
+            );
           }
         } catch (err: any) {
           // This try wraps a progress tick, so it would otherwise swallow the
@@ -789,6 +782,42 @@ function walkOutlineTree(
       flush();
     }
   }
+}
+
+/**
+ * Turn Mathpix's per-page markdown into per-section richContent.
+ *
+ * A section only gets richContent when EVERY page of its startPage..endPage
+ * range has markdown. The reader prefers richContent over extractedText, so a
+ * partly covered section (a neighbour flagged for Mathpix shares its first
+ * page, or one of its pages failed in Mathpix) would otherwise show only those
+ * pages and silently lose the rest. Those sections keep richContent null and
+ * fall back to the full extractedText (KAN-413).
+ */
+export function mapPageMarkdownToSections(
+  sections: { id: string; startPage: number | null; endPage: number | null }[],
+  pageMarkdown: Map<number, string>,
+): { updates: { sectionId: string; richContent: string }[]; partialCount: number } {
+  const updates: { sectionId: string; richContent: string }[] = [];
+  let partialCount = 0;
+  for (const section of sections) {
+    const startPage = section.startPage ?? 1;
+    const endPage = section.endPage ?? startPage;
+
+    const sectionMd: string[] = [];
+    for (let page = startPage; page <= endPage; page++) {
+      const md = pageMarkdown.get(page);
+      if (md) sectionMd.push(md);
+    }
+
+    if (sectionMd.length === 0) continue;
+    if (sectionMd.length < endPage - startPage + 1) {
+      partialCount++;
+      continue;
+    }
+    updates.push({ sectionId: section.id, richContent: sectionMd.join('\n\n') });
+  }
+  return { updates, partialCount };
 }
 
 export async function buildStructureFromOutline(
