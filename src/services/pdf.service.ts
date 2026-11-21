@@ -5,10 +5,31 @@
  * Must stay @napi-rs/canvas: pdfjs-dist 5 resolves white-only rasters against a
  * node-canvas context without throwing (KAN-315).
  */
-import { createCanvas } from '@napi-rs/canvas';
+import { createCanvas, GlobalFonts } from '@napi-rs/canvas';
+import { createRequire } from 'module';
+import { dirname, join } from 'path';
 import type { RawTextItem, RawPageData } from '../lib/nib/parser.js';
 
 const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+
+/**
+ * pdfjs-dist's bundled standard-14 font data. The Railway image has no system
+ * fonts, so a PDF that doesn't embed its fonts (Word/Office exports) rendered
+ * its text as nothing (KAN-414). With this, pdf.js draws standard-14 aliases
+ * (Helvetica, ArialMT, TimesNewRomanPSMT…) as glyph paths. Trailing slash is
+ * required by pdf.js.
+ */
+const STANDARD_FONT_DATA_URL =
+  join(dirname(createRequire(import.meta.url).resolve('pdfjs-dist/package.json')), 'standard_fonts') + '/';
+
+// Missing fonts outside the standard-14 map (MyriadPro, …) are still drawn
+// with fillText in `"<name>", <generic family>`. Give the generic families
+// glyphs so that text isn't dropped on a fontless host.
+for (const family of ['sans-serif', 'serif', 'monospace']) {
+  for (const style of ['Regular', 'Bold', 'Italic', 'BoldItalic']) {
+    GlobalFonts.registerFromPath(join(STANDARD_FONT_DATA_URL, `LiberationSans-${style}.ttf`), family);
+  }
+}
 
 export interface PdfMetadata {
   title: string;
@@ -50,7 +71,11 @@ export class BlankRasterError extends Error {
 /** Load a PDF document. Caller must call doc.destroy() when done. */
 async function loadDocument(buffer: Buffer) {
   const data = new Uint8Array(buffer);
-  return (pdfjsLib as any).getDocument({ data, useSystemFonts: true }).promise;
+  return (pdfjsLib as any).getDocument({
+    data,
+    useSystemFonts: false,
+    standardFontDataUrl: STANDARD_FONT_DATA_URL,
+  }).promise;
 }
 
 // ─── Destination resolution (mirrors frontend's resolveDestPage) ───

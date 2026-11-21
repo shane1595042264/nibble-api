@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createCanvas, loadImage, GlobalFonts } from '@napi-rs/canvas';
 import { createHash } from 'crypto';
 import { pdfService } from '../../../src/services/pdf.service.js';
 
@@ -10,11 +10,11 @@ import { pdfService } from '../../../src/services/pdf.service.js';
  */
 
 /** Build a single-page 400x300 PDF whose content stream is `ops`. */
-function buildPdf(ops: string): Buffer {
+function buildPdf(ops: string, resources = '<< >>'): Buffer {
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << >> /Contents 4 0 R >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources ${resources} /Contents 4 0 R >>`,
     `<< /Length ${ops.length} >>\nstream\n${ops}\nendstream`,
   ];
 
@@ -82,5 +82,44 @@ describe('pdfService.renderPageToImage', () => {
     await expect(pdfService.renderPageToImage(buildPdf(''), 1, 2.0)).rejects.toThrow(
       /blank raster/,
     );
+  });
+});
+
+/** A page of text in `baseFont`, referenced by name only — no FontFile embedded. */
+function buildTextPdf(baseFont: string): Buffer {
+  return buildPdf(
+    'BT\n/F1 36 Tf\n20 150 Td\n(Nibbler non-embedded font) Tj\nET',
+    `<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /${baseFont} >> >> >>`,
+  );
+}
+
+describe('pdfService.renderPageToImage with non-embedded fonts (KAN-414)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('draws standard-14 text as glyph paths, not via the host font stack', async () => {
+    // A fontless host (the Railway image) makes fillText draw nothing; stub it
+    // the same way so this dev box's Arial can't paper over the bug.
+    const ctxProto = Object.getPrototypeOf(createCanvas(1, 1).getContext('2d'));
+    const fillText = vi.spyOn(ctxProto, 'fillText').mockImplementation(() => {});
+
+    // Pre-fix (useSystemFonts, no standardFontDataUrl) this threw BlankRasterError.
+    const png = await pdfService.renderPageToImage(buildTextPdf('Helvetica'), 1, 2.0);
+    const { ink } = await countInkPixels(png);
+
+    expect(fillText).not.toHaveBeenCalled();
+    expect(ink).toBeGreaterThan(1000);
+  });
+
+  it('gives the generic fallback families glyphs for non-standard missing fonts', async () => {
+    // pdf.js draws e.g. MyriadPro with fillText in `"<name>", sans-serif`.
+    expect(GlobalFonts.has('sans-serif')).toBe(true);
+    expect(GlobalFonts.has('serif')).toBe(true);
+    expect(GlobalFonts.has('monospace')).toBe(true);
+
+    const png = await pdfService.renderPageToImage(buildTextPdf('MyriadPro-Regular'), 1, 2.0);
+    const { ink } = await countInkPixels(png);
+    expect(ink).toBeGreaterThan(1000);
   });
 });
