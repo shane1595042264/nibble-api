@@ -31,6 +31,24 @@ describe('generate: request shapes with page images and JSON', () => {
     expect(r).toEqual({ text: 'hi', inputTokens: 9, outputTokens: 2, truncated: true });
   });
 
+  it('Anthropic: 5-generation models get 2048 extra tokens for default thinking, older ones the exact budget (KAN-416)', async () => {
+    const reply = ok({ content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'hi' }], usage: {}, stop_reason: 'end_turn' });
+    for (const [model, expected] of [
+      ['claude-haiku-5-5', 2198],
+      ['claude-sonnet-5', 2198],
+      ['claude-fable-5-1', 2198],
+      ['claude-haiku-4-5', 150],
+      ['claude-opus-4-8', 150],
+      ['claude-3-5-haiku-latest', 150],
+    ] as const) {
+      const f = stubFetch(reply);
+      const r = await generate('anthropic', 'k', model, { prompt: 'P', maxTokens: 150 });
+      expect(sentBody(f).max_tokens, model).toBe(expected);
+      expect(sentBody(f).thinking, model).toBeUndefined();
+      expect(r.text).toBe('hi');
+    }
+  });
+
   it('OpenAI: data-URL image parts, json_object when asked, finish_reason length means truncated', async () => {
     const f = stubFetch(ok({ choices: [{ message: { content: '{}' }, finish_reason: 'length' }], usage: { prompt_tokens: 5, completion_tokens: 1 } }));
     const r = await generate('openai', 'sk-k', 'gpt-4.1-nano', { system: 'S', prompt: 'P', images: [IMG], maxTokens: 50, json: true });

@@ -200,6 +200,17 @@ function isReasoning(provider: AiProvider, model: string): boolean {
   return /gpt-oss|reasoner|thinking|qwq|(^|[/-])r1\b|magistral|glm-4\.[5-9]|glm-[5-9]|kimi-k2/i.test(model);
 }
 
+/**
+ * Claude 5-generation models (Haiku 5.5, Sonnet 5/5.5, Opus 5/5.5, Fable,
+ * Mythos) run adaptive thinking when `thinking` is omitted, and the thinking
+ * counts against max_tokens (KAN-416). Older Claude models don't think unless
+ * asked. Disabling it isn't an option: Opus 5.5, Sonnet 5.5 and Fable reject
+ * `thinking: { type: 'disabled' }` with a 400.
+ */
+function anthropicThinksByDefault(model: string): boolean {
+  return /claude-(haiku|sonnet|opus|fable|mythos)-[5-9]\b/.test(model);
+}
+
 /** Some providers inline the reasoning as <think>...</think> before the answer. */
 function stripThinking(text: string): string {
   return text.replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, '');
@@ -274,7 +285,7 @@ export async function generate(
         headers: anthropicHeaders(key),
         body: JSON.stringify({
           model,
-          max_tokens: input.maxTokens,
+          max_tokens: input.maxTokens + (anthropicThinksByDefault(model) ? 2048 : 0),
           ...(input.system ? { system: input.system } : {}),
           messages: [{ role: 'user', content }],
         }),

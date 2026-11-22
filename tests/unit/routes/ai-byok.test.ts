@@ -58,6 +58,19 @@ describe('reader AI calls run for the signed-in user', () => {
     expect(serviceMock.runAi).toHaveBeenCalledWith(USER_ID, 'translate-word', expect.objectContaining({ json: true }));
   });
 
+  it('a reply cut off before any text is a 502 AI_ERROR, not an empty explanation (KAN-416)', async () => {
+    serviceMock.runAi.mockResolvedValue({ text: '', truncated: true });
+    const res = await post('/ai/explain-translation', { word: 'bank', sentence: 'the bank', translation: '银行', targetLanguage: 'Chinese' });
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatchObject({ code: 'AI_ERROR' });
+  });
+
+  it('an empty reply that finished normally still returns 200', async () => {
+    serviceMock.runAi.mockResolvedValue({ text: '', truncated: false });
+    const res = await post('/ai/explain-translation', { word: 'bank', sentence: 'the bank', translation: '银行', targetLanguage: 'Chinese' });
+    expect(res.status).toBe(200);
+  });
+
   it('without a key the reader gets 409 AI_KEY_REQUIRED, not the old admin-only 402', async () => {
     serviceMock.runAi.mockRejectedValue(new AppError('AI_KEY_REQUIRED', 'Add your own AI key in Settings > AI to use this.', 409));
     const res = await post('/ai/explain-content', { content: 'x' });

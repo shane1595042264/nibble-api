@@ -24,6 +24,11 @@ const FIGURE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 async function text(ctx: AiCallContext, feature: AiFeature, input: Parameters<typeof runAi>[2]): Promise<string> {
   const r = await runAi(ctx.userId, feature, { ...input, signal: ctx.signal });
+  // Cut off before any answer (e.g. the budget went on thinking): an error,
+  // not an empty 200 that the reader would save as an empty explanation.
+  if (r.truncated && !r.text.trim()) {
+    throw Errors.aiError('The AI ran out of room before it answered — try again.');
+  }
   return r.text;
 }
 
