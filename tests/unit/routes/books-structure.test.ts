@@ -13,7 +13,7 @@ vi.mock('../../../src/repositories/book.repository.js', () => ({ bookRepository:
 const sectionRepo = vi.hoisted(() => ({ findByBookId: vi.fn(), softDeleteByBookId: vi.fn() }));
 vi.mock('../../../src/repositories/section.repository.js', () => ({ sectionRepository: sectionRepo }));
 
-const chapterRepo = vi.hoisted(() => ({ softDeleteByBookId: vi.fn() }));
+const chapterRepo = vi.hoisted(() => ({ findByBookId: vi.fn(), softDeleteByBookId: vi.fn() }));
 vi.mock('../../../src/repositories/chapter.repository.js', () => ({ chapterRepository: chapterRepo }));
 
 // Records every bulk insert and echoes the rows back with generated ids.
@@ -80,6 +80,7 @@ describe('PUT /books/:id/structure', () => {
     bookService.getBook.mockResolvedValue({ id: BOOK_ID, catalogId: 'cat', updatedAt: new Date() });
     bookRepo.findCatalogById.mockResolvedValue({ totalPages: 30 });
     bookRepo.update.mockResolvedValue({ updatedAt: new Date() });
+    chapterRepo.findByBookId.mockResolvedValue([]);
     sectionRepo.findByBookId.mockResolvedValue([
       oldSection('a', 1, 10, { isRead: true, readAt: READ_AT }),
       oldSection('b', 11, 20),
@@ -204,6 +205,64 @@ describe('PUT /books/:id/structure', () => {
         { title: 'Tail', startPage: 19, endPage: 30 },
       ]);
       expect(insertedSections().map((r) => r.isRead)).toEqual([true, false]);
+    });
+  });
+
+  // Divide Sections re-sends every other chapter verbatim, so an overlap the stored
+  // structure already has must not fail a save that never touched it (KAN-419).
+  describe('chapter overlaps', () => {
+    const storedChapter = (startPage: number, endPage: number) => ({ id: `ch-${startPage}-${endPage}`, startPage, endPage });
+
+    it('accepts an overlap that is already stored', async () => {
+      chapterRepo.findByBookId.mockResolvedValue([storedChapter(1, 5), storedChapter(5, 5), storedChapter(6, 10)]);
+      const res = await putStructure([
+        { title: 'A', startPage: 1, endPage: 5 },
+        { title: 'B', startPage: 5, endPage: 5 },
+        {
+          title: 'C', startPage: 6, endPage: 10,
+          sections: [{ title: 'C1', startPage: 6, endPage: 8 }, { title: 'C2', startPage: 9, endPage: 10 }],
+        },
+      ]);
+      expect(res.status).toBe(200);
+    });
+
+    it('accepts an already-stored duplicated chapter row', async () => {
+      chapterRepo.findByBookId.mockResolvedValue([storedChapter(13, 20), storedChapter(13, 20)]);
+      const res = await putStructure([
+        { title: 'Preface', startPage: 13, endPage: 20 },
+        { title: 'Preface', startPage: 13, endPage: 20 },
+      ]);
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects an overlap the save creates, naming both chapters', async () => {
+      chapterRepo.findByBookId.mockResolvedValue([storedChapter(1, 5), storedChapter(6, 10)]);
+      const res = await putStructure([
+        { title: 'A', startPage: 1, endPage: 6 },
+        { title: 'C', startPage: 6, endPage: 10 },
+      ]);
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+      expect(body.error.message).toBe('Chapter "A" (pages 1-6) overlaps chapter "C" (pages 6-10)');
+      expect(chapterRepo.softDeleteByBookId).not.toHaveBeenCalled();
+    });
+
+    it('rejects duplicating a range that is stored only once', async () => {
+      chapterRepo.findByBookId.mockResolvedValue([storedChapter(13, 20)]);
+      const res = await putStructure([
+        { title: 'Preface', startPage: 13, endPage: 20 },
+        { title: 'Preface copy', startPage: 13, endPage: 20 },
+      ]);
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects overlaps on a book with no stored chapters', async () => {
+      const res = await putStructure([
+        { title: 'A', startPage: 1, endPage: 5 },
+        { title: 'B', startPage: 5, endPage: 9 },
+      ]);
+      expect(res.status).toBe(400);
     });
   });
 });

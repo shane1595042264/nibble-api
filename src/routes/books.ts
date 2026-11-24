@@ -256,22 +256,48 @@ const chapterItemSchema = z.object({
 });
 
 const structureSchema = z.object({
-  chapters: z.array(chapterItemSchema).max(500).refine((chapters) => {
-    for (let i = 0; i < chapters.length; i++) {
-      for (let j = i + 1; j < chapters.length; j++) {
-        const a = chapters[i];
-        const b = chapters[j];
-        if (a.startPage <= b.endPage && b.startPage <= a.endPage) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }, { message: 'Chapter page ranges must not overlap' }),
+  chapters: z.array(chapterItemSchema).max(500),
   // Optional optimistic-lock token. If supplied, server rejects with 409 STALE_BOOK
   // when the stored books.updatedAt no longer matches — prevents silent cross-tab overwrite.
   expectedUpdatedAt: z.string().datetime().optional(),
 });
+
+type PageRange = { title: string; startPage: number; endPage: number };
+
+/**
+ * First overlapping chapter pair the save would CREATE, or null.
+ *
+ * Divide Sections and Reorganize re-send every untouched chapter verbatim, and the
+ * outline import stores overlapping chapters (two bookmarks on one page, whole-book
+ * catch-alls, duplicated rows). Rejecting every overlap therefore failed every save on
+ * those books, whichever chapter was edited (KAN-419). A pair is tolerated when both
+ * ranges are already stored as distinct rows: the stored structure overlaps the same way.
+ */
+export function findNewChapterOverlap(
+  requested: PageRange[],
+  stored: Array<{ startPage: number | null; endPage: number | null }>,
+): [PageRange, PageRange] | null {
+  const storedCount = new Map<string, number>();
+  for (const ch of stored) {
+    if (ch.startPage == null || ch.endPage == null) continue;
+    const key = `${ch.startPage}-${ch.endPage}`;
+    storedCount.set(key, (storedCount.get(key) ?? 0) + 1);
+  }
+  for (let i = 0; i < requested.length; i++) {
+    for (let j = i + 1; j < requested.length; j++) {
+      const a = requested[i];
+      const b = requested[j];
+      if (a.startPage > b.endPage || b.startPage > a.endPage) continue;
+      const keyA = `${a.startPage}-${a.endPage}`;
+      const keyB = `${b.startPage}-${b.endPage}`;
+      const alreadyStored = keyA === keyB
+        ? (storedCount.get(keyA) ?? 0) >= 2
+        : storedCount.has(keyA) && storedCount.has(keyB);
+      if (!alreadyStored) return [a, b];
+    }
+  }
+  return null;
+}
 
 const suggestStructureSchema = z.object({
   tocPages: z.array(z.number().int().positive()).min(1).max(20),
@@ -328,6 +354,16 @@ bookRoutes.put('/:id/structure', async (c) => {
   const { chapters, sections } = await import('../db/schema.js');
   const { sectionRepository } = await import('../repositories/section.repository.js');
   const { chapterRepository } = await import('../repositories/chapter.repository.js');
+
+  const overlap = findNewChapterOverlap(parsed.data.chapters, await chapterRepository.findByBookId(book.id));
+  if (overlap) {
+    const [a, b] = overlap;
+    throw new AppError(
+      'VALIDATION_ERROR',
+      `Chapter "${a.title}" (pages ${a.startPage}-${a.endPage}) overlaps chapter "${b.title}" (pages ${b.startPage}-${b.endPage})`,
+      400,
+    );
+  }
 
   // Save old sections for progress preservation
   const oldSections = await sectionRepository.findByBookId(book.id);
