@@ -205,12 +205,23 @@ export const bookRepository = {
 
   async findCatalogByFuzzyTitle(title: string, limit: number = MAX_LIST_ROWS) {
     const cap = Math.min(limit, MAX_LIST_ROWS);
+    // similarity() scores the query against the WHOLE title, so one word of a
+    // long title ("Spring" vs "Spring Boot: Up and Running") scored < 0.3 and
+    // was dropped (KAN-423). word_similarity() scores it against the best-
+    // matching part of the title; the ILIKE makes an exact substring always
+    // match. Whole-title similarity breaks ties so the exact title ranks first.
+    const pattern = `%${title.replace(/[\\%_]/g, '\\$&')}%`;
     try {
       const rows = await db
         .select()
         .from(bookCatalog)
-        .where(sql`similarity(${bookCatalog.title}, ${title}) > 0.3`)
-        .orderBy(desc(sql`similarity(${bookCatalog.title}, ${title})`))
+        .where(
+          sql`(word_similarity(${title}, ${bookCatalog.title}) > 0.3 OR ${bookCatalog.title} ILIKE ${pattern})`,
+        )
+        .orderBy(
+          desc(sql`word_similarity(${title}, ${bookCatalog.title})`),
+          desc(sql`similarity(${bookCatalog.title}, ${title})`),
+        )
         .limit(cap);
       return warnIfCapped(rows, {
         entity: 'bookCatalog',
